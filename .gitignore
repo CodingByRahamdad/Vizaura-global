@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Build output
+dist/
+build/
+
+# Environment files
+.env
+.env.*
+.env.example
+
+# Prisma — generated client is rebuilt by `npm run db:generate`
+backend/src/generated/
+
+# Local-disk product media uploads (Phase 6M, dev-appropriate only — see
+# docs/modules/CATALOG.md) — never committed.
+backend/uploads/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# TypeScript
+*.tsbuildinfo
+
+# Testing
+coverage/

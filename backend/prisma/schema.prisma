@@ -1,0 +1,1480 @@
+// VIZAURA GLOBAL — database schema
+//
+// Domain-oriented, not screen-oriented. See docs/DATABASE.md for the
+// modelling rules this file follows (money representation, market/pricing
+// model, cascade strategy, service-layer invariants).
+//
+// Phase 4C scope: Identity, Users, RBAC, Markets, Catalog, Pricing.
+// Phase 4G added Inventory. Phase 4H added Cart. Phase 4I added Checkout's
+// output: Order/OrderItem/OrderAddress (Checkout owns creation only — the
+// Orders domain's own read/management API and status transitions remain a
+// future phase; see docs/modules/CHECKOUT.md).
+// Payments, Shipping, Promotions, Reviews, Notifications, CMS, Analytics
+// and Audit are not modelled yet and will be added by their own phases.
+// Phase 5B-2C added Wishlist.
+//
+// This is ONE business operating in multiple markets. There is no tenant
+// concept and must never be one: markets are configuration boundaries.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+// Prisma 7 no longer accepts `url` here. The connection string for CLI
+// commands (migrate/validate/generate) lives in ../prisma.config.ts, and the
+// runtime connection is supplied to PrismaClient via a driver adapter in
+// src/repositories/prismaClient.ts.
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum VariantStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+}
+
+enum ProductBadge {
+  BEST_SELLER
+  NEW
+}
+
+enum StockMovementType {
+  RECEIPT
+  ADJUSTMENT
+}
+
+enum StockReservationStatus {
+  ACTIVE
+  RELEASED
+}
+
+/// ACTIVE is the only value this phase ever creates or transitions to.
+/// CONVERTED/ABANDONED are named ahead of time (grounded in the PRD's own
+/// cart-lifecycle and "abandoned cart" language) for the future
+/// Checkout/Notifications phases that will own those transitions — Cart
+/// itself performs no status transition logic in this phase.
+enum CartStatus {
+  ACTIVE
+  CONVERTED
+  ABANDONED
+}
+
+/// Only PENDING is ever produced by Checkout (Phase 4I). The remaining
+/// values are pre-declared per the PRD's own documented order-state-machine
+/// language for the future Orders phase to transition through — the same
+/// "declare ahead of the owning phase" posture Cart already used for
+/// CONVERTED/ABANDONED.
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  COMPLETED
+  CANCELLED
+  FAILED
+  REFUNDED
+  RETURNED
+}
+
+/// Also backs Payment.status/PaymentTransaction.status (Phase 4K) — reused
+/// rather than duplicated, since it already is the PRD's own PaymentStatus
+/// list. Checkout still only ever produces PENDING on Order creation;
+/// Payments is the sole writer of every other value via
+/// OrdersService.updatePaymentStatus.
+enum OrderPaymentStatus {
+  PENDING
+  AUTHORIZED
+  PAID
+  FAILED
+  CANCELLED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+/// Distinguishes a storefront checkout order from one an admin entered on a
+/// customer's behalf (phone/WhatsApp/walk-in). Defaults to ONLINE so the
+/// migration backfills every existing row correctly with no code change at
+/// Checkout; only the admin create-order path ever sets OFFLINE.
+enum OrderSource {
+  ONLINE
+  OFFLINE
+}
+
+// ---------------------------------------------------------------------------
+// Identity / Users
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String  @id @default(uuid(7)) @db.Uuid
+  email        String  @unique @db.VarChar(255)
+  passwordHash String  @db.VarChar(255)
+  firstName    String  @db.VarChar(100)
+  lastName     String  @db.VarChar(100)
+  phone        String? @db.VarChar(32)
+
+  /// Single standing address for a customer account — flat columns, not a
+  /// reusable Address book (same "inline, not a separate domain" posture
+  /// OrderAddress already established; see that model's doc comment).
+  /// Naming/widths mirror OrderAddress's fields. All nullable: no existing
+  /// customer has one until they're edited.
+  addressLine1 String? @db.VarChar(255)
+  addressLine2 String? @db.VarChar(255)
+  city         String? @db.VarChar(100)
+  region       String? @db.VarChar(100)
+  postalCode   String? @db.VarChar(20)
+  countryCode  String? @db.Char(2)
+
+  status            UserStatus @default(PENDING_VERIFICATION)
+  emailVerifiedAt   DateTime?
+  // Set on every password change so the auth phase can reject access tokens
+  // issued before it, not just revoke refresh-token sessions.
+  passwordChangedAt DateTime?
+  lastLoginAt       DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  roles                   UserRole[]
+  sessions                Session[]
+  emailVerificationTokens EmailVerificationToken[]
+  passwordResetTokens     PasswordResetToken[]
+  stockMovements          StockMovement[]
+  carts                   Cart[]
+  wishlist                Wishlist?
+  orders                  Order[]
+  orderStatusChanges      OrderStatusHistory[]
+  returnsRequested        Return[]                 @relation("ReturnRequestedBy")
+  returnsReviewed         Return[]                 @relation("ReturnReviewedBy")
+  auditLogs               AuditLog[]
+  reviews                 Review[]
+  notificationReads       NotificationRead[]
+  addresses               Address[]
+  customerNotifications   CustomerNotification[]
+
+  @@index([status])
+  @@map("users")
+}
+
+/// Refresh-token session. The raw refresh token is NEVER stored; only a
+/// SHA-256 hash of it. `familyId` groups a rotation chain so that reuse of
+/// an already-rotated token can revoke the whole family in one statement.
+model Session {
+  id               String @id @default(uuid(7)) @db.Uuid
+  userId           String @db.Uuid
+  refreshTokenHash String @unique @db.Char(64)
+  familyId         String @db.Uuid
+
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?   @db.VarChar(255)
+
+  ipAddress String?  @db.VarChar(64)
+  userAgent String?  @db.VarChar(512)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// Single-use, hashed email-verification token.
+model EmailVerificationToken {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique @db.Char(64)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verification_tokens")
+}
+
+/// Single-use, hashed password-reset token.
+model PasswordResetToken {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique @db.Char(64)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — permission-driven authorization (never role-string equality)
+// ---------------------------------------------------------------------------
+
+model Role {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  key         String   @unique @db.VarChar(64)
+  name        String   @db.VarChar(100)
+  description String?  @db.VarChar(255)
+  // System roles (e.g. super_admin, customer) cannot be deleted or renamed.
+  isSystem    Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+/// A single `resource:action` capability. `key` is the documented lookup form
+/// (RBAC.md); `resource` and `action` are stored alongside it so permissions
+/// can be grouped by resource in the admin UI without parsing strings.
+/// The compound unique keeps the two representations from diverging.
+model Permission {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  key         String   @unique @db.VarChar(100)
+  resource    String   @db.VarChar(50)
+  action      String   @db.VarChar(50)
+  description String?  @db.VarChar(255)
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+
+  @@unique([resource, action])
+  @@index([resource])
+  @@map("permissions")
+}
+
+model UserRole {
+  userId     String   @db.Uuid
+  roleId     String   @db.Uuid
+  assignedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String @db.Uuid
+  permissionId String @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// ---------------------------------------------------------------------------
+// Markets — business configuration boundaries, NOT tenants
+// ---------------------------------------------------------------------------
+
+/// A market VIZAURA GLOBAL sells into (initially Pakistan and UAE).
+/// Tax, shipping, payment-method and promotion configuration will be added
+/// by their own phases; see docs/DATABASE.md on the deferred
+/// MarketConfiguration entity.
+model Market {
+  id                 String  @id @default(uuid(7)) @db.Uuid
+  code               String  @unique @db.VarChar(8)
+  name               String  @db.VarChar(100)
+  currencyCode       String  @db.Char(3)
+  /// Decimal exponent of the currency's minor unit (2 => amounts are stored
+  /// in 1/100 units). Used for formatting; never for conversion between
+  /// markets.
+  currencyMinorUnits Int     @default(2)
+  timezone           String? @db.VarChar(64)
+  isActive           Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  productAvailability ProductMarket[]
+  variantPrices       VariantPrice[]
+  variantStocks       VariantStock[]
+  carts               Cart[]
+  orders              Order[]
+  shippingMethods     ShippingMethod[]
+
+  @@map("markets")
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+model Category {
+  id          String  @id @default(uuid(7)) @db.Uuid
+  parentId    String? @db.Uuid
+  name        String  @db.VarChar(150)
+  slug        String  @unique @db.VarChar(255)
+  description String?
+  imageUrl    String? @db.VarChar(2048)
+  isActive    Boolean @default(true)
+  position    Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Restrict: a category with children must be re-parented before removal.
+  parent                Category?         @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  children              Category[]        @relation("CategoryTree")
+  products              ProductCategory[]
+  promotionTargets      Promotion[]       @relation("PromotionTargetCategory")
+  promotionGrid2Targets Promotion[]       @relation("PromotionGrid2TargetCategory")
+
+  @@index([parentId])
+  @@map("categories")
+}
+
+/// A sellable product. Holds no price, stock, rating or market flag — those
+/// are owned by the Pricing, Inventory, Reviews and Market domains.
+/// badge/features/specifications are simple display-only attributes with no
+/// independent query/relational need — everything else price/stock/rating/
+/// market-related still lives in its own domain.
+/// Every product has at least one variant (enforced in the service layer);
+/// simple products carry a single default variant.
+model Product {
+  id                  String        @id @default(uuid(7)) @db.Uuid
+  slug                String        @unique @db.VarChar(255)
+  name                String        @db.VarChar(255)
+  shortDescription    String?       @db.VarChar(512)
+  description         String?
+  status              ProductStatus @default(DRAFT)
+  isActive            Boolean       @default(true)
+  badge               ProductBadge?
+  features            String[]      @default([])
+  specifications      Json?
+  benefits            String[]      @default([])
+  ingredients         String[]      @default([])
+  certifications      String[]      @default([])
+  storageInstructions String?       @db.VarChar(500)
+  shelfLife           String?       @db.VarChar(200)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  categories            ProductCategory[]
+  variants              ProductVariant[]
+  options               ProductOption[]
+  media                 ProductMedia[]
+  marketAvailability    ProductMarket[]
+  orderItems            OrderItem[]
+  wishlistItems         WishlistItem[]
+  reviews               Review[]
+  promotionTargets      Promotion[]       @relation("PromotionTargetProduct")
+  promotionGrid2Targets Promotion[]       @relation("PromotionGrid2TargetProduct")
+
+  @@index([status])
+  @@map("products")
+}
+
+/// A customer-authored product review. `authorName`/`authorLocation`/
+/// `avatarUrl` are snapshotted at submission time (not joined live from
+/// User) so a review's byline doesn't silently change if the author later
+/// edits their profile. `isFeatured` opts a review into the homepage
+/// testimonial band; `isPublished` is the moderation gate (reviews:moderate).
+/// `userId` is nullable because an ADMIN-sourced review (e.g. a testimonial
+/// quoted from elsewhere) is not required to be tied to a real account;
+/// Postgres treats multiple NULLs in the (productId, userId) unique index
+/// as distinct, so this never weakens the "one real review per customer
+/// per product" guarantee for CUSTOMER-sourced rows. `isVerifiedPurchase`
+/// is stamped once at submission time (a historical fact, not a live
+/// aggregate) and is never recomputed afterward.
+model Review {
+  id                 String       @id @default(uuid(7)) @db.Uuid
+  productId          String       @db.Uuid
+  userId             String?      @db.Uuid
+  rating             Int
+  title              String?      @db.VarChar(150)
+  body               String
+  authorName         String       @db.VarChar(150)
+  authorLocation     String?      @db.VarChar(120)
+  avatarUrl          String?      @db.VarChar(2048)
+  isPublished        Boolean      @default(true)
+  isFeatured         Boolean      @default(false)
+  source             ReviewSource @default(CUSTOMER)
+  isVerifiedPurchase Boolean      @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([productId, userId])
+  @@index([productId])
+  @@index([userId])
+  @@index([source])
+  @@map("reviews")
+}
+
+model ProductCategory {
+  productId  String @db.Uuid
+  categoryId String @db.Uuid
+
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([productId, categoryId])
+  @@index([categoryId])
+  @@map("product_categories")
+}
+
+/// A variant axis for a product, e.g. "Size" or "Pack". Option names are not
+/// hardcoded anywhere in the schema.
+model ProductOption {
+  id        String @id @default(uuid(7)) @db.Uuid
+  productId String @db.Uuid
+  name      String @db.VarChar(64)
+  position  Int    @default(0)
+
+  product            Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  values             ProductOptionValue[]
+  variantAssignments VariantOptionValue[]
+
+  @@unique([productId, name])
+  @@map("product_options")
+}
+
+/// A permitted value on an option axis, e.g. "50g" for "Size".
+model ProductOptionValue {
+  id       String @id @default(uuid(7)) @db.Uuid
+  optionId String @db.Uuid
+  value    String @db.VarChar(64)
+  position Int    @default(0)
+
+  option             ProductOption        @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  variantAssignments VariantOptionValue[]
+
+  @@unique([optionId, value])
+  @@map("product_option_values")
+}
+
+/// The stock-keeping unit. SKU, pricing and (in a later phase) inventory
+/// always attach here, never to Product — including for simple products,
+/// which carry exactly one default variant.
+model ProductVariant {
+  id        String        @id @default(uuid(7)) @db.Uuid
+  productId String        @db.Uuid
+  sku       String        @unique @db.VarChar(64)
+  title     String        @db.VarChar(150)
+  status    VariantStatus @default(ACTIVE)
+  position  Int           @default(0)
+  isDefault Boolean       @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  product      Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  optionValues VariantOptionValue[]
+  prices       VariantPrice[]
+  media        ProductMedia[]
+  stocks       VariantStock[]
+  cartItems    CartItem[]
+  orderItems   OrderItem[]
+
+  @@index([productId])
+  @@map("product_variants")
+}
+
+/// Resolves a variant to one value per option axis. `optionId` is derivable
+/// from `optionValueId`; it is stored so the database itself can guarantee a
+/// variant never holds two values of the same option.
+model VariantOptionValue {
+  variantId     String @db.Uuid
+  optionId      String @db.Uuid
+  optionValueId String @db.Uuid
+
+  variant     ProductVariant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  option      ProductOption      @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  optionValue ProductOptionValue @relation(fields: [optionValueId], references: [id], onDelete: Cascade)
+
+  @@id([variantId, optionValueId])
+  @@unique([variantId, optionId])
+  @@index([optionValueId])
+  @@map("variant_option_values")
+}
+
+/// Media reference only — no storage-provider integration lives here.
+model ProductMedia {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  productId String    @db.Uuid
+  variantId String?   @db.Uuid
+  type      MediaType @default(IMAGE)
+  url       String    @db.VarChar(2048)
+  altText   String?   @db.VarChar(255)
+  position  Int       @default(0)
+  isPrimary Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@index([productId])
+  @@index([variantId])
+  @@map("product_media")
+}
+
+// ---------------------------------------------------------------------------
+// Product availability per market
+// ---------------------------------------------------------------------------
+
+/// Per-market configuration for a product. Products are never duplicated to
+/// differ by market.
+///   isAvailable — may be sold in this market
+///   isVisible   — appears in this market's storefront listings/search
+model ProductMarket {
+  productId   String  @db.Uuid
+  marketId    String  @db.Uuid
+  isAvailable Boolean @default(true)
+  isVisible   Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  market  Market  @relation(fields: [marketId], references: [id], onDelete: Cascade)
+
+  @@id([productId, marketId])
+  @@index([marketId])
+  @@map("product_markets")
+}
+
+// ---------------------------------------------------------------------------
+// Pricing — independently configured per market, NEVER FX-derived
+// ---------------------------------------------------------------------------
+
+/// The selling price of a variant in one market.
+///
+/// `amount` and `saleAmount` are integers in the market currency's minor unit
+/// (PKR 4,999 => 499900 paisa; AED 149 => 14900 fils). Monetary values are
+/// never floating point.
+///
+/// Pakistan and UAE prices are independent commercial decisions. There is no
+/// currency conversion between markets anywhere in this system; exchange
+/// rates, if ever introduced, are for reporting only.
+model VariantPrice {
+  id           String @id @default(uuid(7)) @db.Uuid
+  variantId    String @db.Uuid
+  marketId     String @db.Uuid
+  /// Must equal the market's currencyCode (service-layer invariant); stored
+  /// here so every monetary row carries its own currency.
+  currencyCode String @db.Char(3)
+
+  amount       Int
+  saleAmount   Int?
+  /// Optional sale window. A sale applies when saleAmount is set and now()
+  /// falls inside the window (an unset bound is open-ended).
+  saleStartsAt DateTime?
+  saleEndsAt   DateTime?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  market  Market         @relation(fields: [marketId], references: [id], onDelete: Cascade)
+
+  @@unique([variantId, marketId])
+  @@index([marketId])
+  @@map("variant_prices")
+}
+
+// ---------------------------------------------------------------------------
+// Inventory — stock per variant per market, never location/warehouse
+// (no such entity exists in this project; Market is the only defined
+// location-like boundary, matching Pricing's identical scoping).
+// ---------------------------------------------------------------------------
+
+/// Stock for one variant in one market. `onHand` and `reserved` are stored;
+/// `available` (onHand - reserved) is deliberately never persisted — it is
+/// trivially derived and storing it would risk drift. Negative inventory is
+/// prohibited both here (CHECK constraints, added by hand to the migration —
+/// see docs/DATABASE.md) and in the service layer (atomic guarded updates).
+model VariantStock {
+  id        String @id @default(uuid(7)) @db.Uuid
+  variantId String @db.Uuid
+  marketId  String @db.Uuid
+  onHand    Int    @default(0)
+  reserved  Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  variant      ProductVariant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  market       Market             @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  movements    StockMovement[]
+  reservations StockReservation[]
+
+  @@unique([variantId, marketId])
+  @@index([marketId])
+  @@map("variant_stocks")
+}
+
+/// Auditable record of every onHand change. RECEIPT (restock, always
+/// positive) and ADJUSTMENT (signed correction, reason required) are the
+/// only types grounded in docs/modules/INVENTORY.md — no transfer/waste/
+/// purchase/sale/return types exist; sale-driven decrement belongs to the
+/// future Orders phase.
+model StockMovement {
+  id              String            @id @default(uuid(7)) @db.Uuid
+  stockId         String            @db.Uuid
+  type            StockMovementType
+  quantityDelta   Int
+  resultingOnHand Int
+  reason          String?           @db.VarChar(255)
+  createdByUserId String?           @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  stock         VariantStock @relation(fields: [stockId], references: [id], onDelete: Cascade)
+  createdByUser User?        @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([stockId])
+  @@map("stock_movements")
+}
+
+/// A generic, owner-agnostic hold against available stock. `reference` is an
+/// opaque caller-supplied key (a future Cart/Checkout/Order id) — no
+/// owner/expiry semantics are defined here; that belongs to whichever future
+/// phase actually has a session/cart model to design them against.
+/// Idempotent per (stockId, reference): reserving twice with the same
+/// reference does not double-reserve.
+model StockReservation {
+  id         String                 @id @default(uuid(7)) @db.Uuid
+  stockId    String                 @db.Uuid
+  quantity   Int
+  reference  String                 @db.VarChar(255)
+  status     StockReservationStatus @default(ACTIVE)
+  releasedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  stock VariantStock @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, reference])
+  @@index([stockId])
+  @@map("stock_reservations")
+}
+
+// ---------------------------------------------------------------------------
+// Cart — a customer's in-progress selection prior to checkout, scoped to
+// exactly one market. Cart items never carry a persisted price; totals are
+// always recalculated server-side from current Pricing/Inventory state (see
+// docs/modules/CART.md).
+// ---------------------------------------------------------------------------
+
+/// One cart per (user, market). `@@unique([userId, marketId])` guarantees
+/// this at the database level — the same guard Pricing/Inventory rely on for
+/// their own (variantId, marketId) scoping — which is also how "concurrent
+/// cart creation" races are resolved (try create, fall back to the existing
+/// row on a unique-constraint collision, mirroring PricingRepository's
+/// upsertPrice pattern).
+///
+/// `userId` is required (never null) in this phase: the PRD's conceptual
+/// schema marks it nullable for guest-cart support, but no guest/anonymous
+/// session identity mechanism exists anywhere in this project's Auth domain.
+/// Building one here would be inventing infrastructure outside Cart's scope
+/// — recorded as a deferred PRD discrepancy in docs/modules/CART.md rather
+/// than silently dropped or silently built.
+///
+/// `status`/`expiresAt` exist per the PRD's documented Cart entity but this
+/// phase only ever produces ACTIVE with a null expiresAt — no TTL sweep or
+/// conversion logic is implemented (future Checkout/Notifications concern).
+model Cart {
+  id        String     @id @default(uuid(7)) @db.Uuid
+  userId    String     @db.Uuid
+  marketId  String     @db.Uuid
+  status    CartStatus @default(ACTIVE)
+  expiresAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  market Market     @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  items  CartItem[]
+
+  @@unique([userId, marketId])
+  @@index([marketId])
+  @@map("carts")
+}
+
+/// A line in a cart: a variant and a quantity, nothing else. No price is
+/// stored here — `unitAmount`/`lineTotal` in the API response are always
+/// computed at read time from Pricing's current effective price (see
+/// cart.service.ts), exactly the "never trust cart prices" rule the PRD and
+/// docs/modules/CART.md both state. `@@unique([cartId, variantId])` is the
+/// PRD's own documented uniqueness rule and doubles as the guard against
+/// duplicate-item races (try create, fall back to an atomic quantity
+/// increment on collision — mirrors PricingRepository.upsertPrice).
+model CartItem {
+  id        String @id @default(uuid(7)) @db.Uuid
+  cartId    String @db.Uuid
+  variantId String @db.Uuid
+  quantity  Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cart    Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, variantId])
+  @@index([variantId])
+  @@map("cart_items")
+}
+
+// ---------------------------------------------------------------------------
+// Wishlist — product-level, market-independent (Phase 5B-2C)
+//
+// Contrast with Cart: the PRD's own relationship diagram draws
+// `WishlistItem ──► Product` (not Variant), and no Wishlist mention anywhere
+// in the PRD references a market. One Wishlist per user (`@@unique([userId])`
+// below), never auto-emptied when a saved product goes inactive — a read
+// re-derives `isAvailable` live, the item itself is never silently dropped
+// (same "keep it, flag it" rule Cart already established).
+// ---------------------------------------------------------------------------
+
+model Wishlist {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items WishlistItem[]
+
+  @@unique([userId])
+  @@map("wishlists")
+}
+
+/// A saved product, nothing else — no price/variant stored here (see the
+/// section comment above). `@@unique([wishlistId, productId])` is the PRD's
+/// own uniqueness rule and doubles as the duplicate-add race guard: unlike
+/// CartItem there is no quantity to increment, so a unique-constraint
+/// collision on add is simply treated as an idempotent success (re-fetch,
+/// no raw UPDATE needed).
+model WishlistItem {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  wishlistId String   @db.Uuid
+  productId  String   @db.Uuid
+  createdAt  DateTime @default(now())
+
+  wishlist Wishlist @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([wishlistId, productId])
+  @@index([productId])
+  @@map("wishlist_items")
+}
+
+// ---------------------------------------------------------------------------
+// Checkout's output — Order / OrderItem / OrderAddress (Phase 4I).
+//
+// Checkout OWNS CREATION ONLY. The Orders domain's own read/management API
+// (GET /orders, status transitions, admin filtering) is a future phase —
+// see docs/modules/CHECKOUT.md and docs/modules/ORDERS.md for the boundary.
+// ---------------------------------------------------------------------------
+
+/// The immutable commercial record produced by a successful checkout.
+/// `userId`/`marketId` use onDelete: Restrict (not Cascade) — a financial
+/// record must not silently vanish because a user row or market row is
+/// removed, unlike Cart's disposable working state.
+///
+/// `paymentMethod` is a plain string, not a Prisma enum: the PRD explicitly
+/// leaves the provider list open ("specific providers should be selected
+/// during architecture/integration planning rather than hard-coded now").
+/// Only "COD" is accepted this phase (service-layer validation) since no
+/// Payments domain/provider exists yet.
+///
+/// `idempotencyKey` replaces the PRD's fuller separate IdempotencyKey table
+/// (key, operation, userId, requestHash, response, expiresAt) — the only
+/// thing that must never happen twice is order creation itself, so a unique
+/// column on the protected row is smaller and needs no cleanup job. See
+/// docs/modules/CHECKOUT.md for the full idempotency contract.
+model Order {
+  id             String             @id @default(uuid(7)) @db.Uuid
+  orderNumber    String             @unique @db.VarChar(32)
+  /// Nullable to support a guest/no-account offline order (admin-entered,
+  /// phone/WhatsApp/walk-in customer with no registered account). Exactly
+  /// one of userId/guestEmail is set — enforced by a DB CHECK constraint
+  /// (see migration add_guest_orders) and by createAdminOrderBodySchema's
+  /// zod .refine(). A guest order's identity otherwise comes entirely from
+  /// its OrderAddress snapshot (fullName/phone) — no fake/password-less
+  /// User row is ever created for it.
+  userId         String?            @db.Uuid
+  guestEmail     String?            @db.VarChar(255)
+  marketId       String             @db.Uuid
+  currencyCode   String             @db.Char(3)
+  status         OrderStatus        @default(PENDING)
+  paymentMethod  String             @db.VarChar(32)
+  paymentStatus  OrderPaymentStatus @default(PENDING)
+  /// Phase 4M: written exclusively by the Shipping module via
+  /// OrdersService.updateShipmentStatus, the exact same unpermissioned
+  /// passthrough shape as updatePaymentStatus. Orders' own transitionStatus
+  /// never touches this column; Shipping never touches `status`.
+  shipmentStatus ShipmentStatus     @default(PENDING)
+
+  /// Phase: Admin Orders overhaul. ONLINE = storefront checkout (the only
+  /// source that existed before this column). OFFLINE = admin-entered order
+  /// (phone/WhatsApp/walk-in) created via POST /admin/orders.
+  source OrderSource @default(ONLINE)
+
+  /// All Int minor-units, matching every other monetary column in this
+  /// schema. discountAmount/taxAmount are always 0 this phase —
+  /// Promotions/tax configuration don't exist yet. shippingAmount is
+  /// computed by Checkout from the selected ShippingMethod as of Phase 4M
+  /// (previously always 0 — see docs/modules/CHECKOUT.md).
+  subtotalAmount Int
+  discountAmount Int @default(0)
+  shippingAmount Int @default(0)
+  taxAmount      Int @default(0)
+  totalAmount    Int
+
+  idempotencyKey String @unique @db.VarChar(255)
+
+  placedAt  DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User?          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  market    Market         @relation(fields: [marketId], references: [id], onDelete: Restrict)
+  items     OrderItem[]
+  addresses OrderAddress[]
+
+  statusHistory OrderStatusHistory[]
+  payments      Payment[]
+  shipment      Shipment?
+  returns       Return[]
+
+  @@index([userId])
+  @@index([marketId])
+  @@index([status])
+  @@map("orders")
+}
+
+/// A snapshotted line — product/variant name, SKU and unit price are copied
+/// at checkout time so a later catalog/price edit can never change history.
+/// `productId`/`variantId` are nullable with onDelete: SetNull (same
+/// "preserve the snapshot even if the source row is later removed" pattern
+/// already used for product_media.variantId).
+model OrderItem {
+  id        String  @id @default(uuid(7)) @db.Uuid
+  orderId   String  @db.Uuid
+  productId String? @db.Uuid
+  variantId String? @db.Uuid
+
+  sku          String @db.VarChar(64)
+  productName  String @db.VarChar(255)
+  variantName  String @db.VarChar(150)
+  unitAmount   Int
+  quantity     Int
+  lineTotal    Int
+  currencyCode String @db.Char(3)
+
+  createdAt DateTime @default(now())
+
+  order       Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product     Product?        @relation(fields: [productId], references: [id], onDelete: SetNull)
+  variant     ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  returnItems ReturnItem[]
+
+  @@index([orderId])
+  @@index([variantId])
+  @@map("order_items")
+}
+
+/// An inline address snapshot, not a FK to a reusable address book — no
+/// Customers/Address domain exists yet (docs/modules/CHECKOUT.md documents
+/// this as a deliberate deviation from the PRD's literal `shippingAddressId`
+/// field). Exactly 2 rows per Order — BILLING and SHIPPING — not 1: every
+/// order always collects a billing/payment address, and a SHIPPING row is
+/// either the customer/admin's own distinct entry (checkbox checked) or a
+/// copy of BILLING (checkbox unchecked), so every consumer that reads "the
+/// order's shipping address" never has to special-case a missing one.
+enum OrderAddressType {
+  BILLING
+  SHIPPING
+
+  @@map("order_address_type")
+}
+
+model OrderAddress {
+  id          String           @id @default(uuid(7)) @db.Uuid
+  orderId     String           @db.Uuid
+  type        OrderAddressType
+  fullName    String           @db.VarChar(150)
+  phone       String           @db.VarChar(32)
+  line1       String           @db.VarChar(255)
+  line2       String?          @db.VarChar(255)
+  city        String           @db.VarChar(100)
+  region      String?          @db.VarChar(100)
+  postalCode  String?          @db.VarChar(20)
+  countryCode String           @db.Char(2)
+
+  createdAt DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, type])
+  @@map("order_addresses")
+}
+
+/// A customer's own standing billing/shipping address — exactly one row per
+/// (userId, type), upsert-only (never a multi-address book; this is a
+/// deliberate, user-confirmed scope decision, see docs/CURRENT_TASK.md).
+/// Distinct from OrderAddress (a frozen per-order snapshot taken at checkout)
+/// and distinct from User's legacy flat address columns (admin-only, written
+/// via PATCH /admin/customers/:id, unrelated to this model). Field list
+/// mirrors OrderAddress's exactly so checkout prefill is a straight
+/// passthrough.
+enum AddressType {
+  BILLING
+  SHIPPING
+
+  @@map("address_type")
+}
+
+model Address {
+  id          String      @id @default(uuid(7)) @db.Uuid
+  userId      String      @db.Uuid
+  type        AddressType
+  fullName    String      @db.VarChar(150)
+  phone       String      @db.VarChar(32)
+  line1       String      @db.VarChar(255)
+  line2       String?     @db.VarChar(255)
+  city        String      @db.VarChar(100)
+  region      String?     @db.VarChar(100)
+  postalCode  String?     @db.VarChar(20)
+  countryCode String      @db.Char(2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type])
+  @@map("addresses")
+}
+
+/// Append-only audit trail of Order.status transitions made through the
+/// Orders module (PATCH .../status). Checkout's own PENDING creation is not
+/// recorded here — nothing "transitioned" at that point, the row simply
+/// didn't exist before. `changedByUserId` is nullable to allow a future
+/// system-initiated transition with no human actor (same nullable-actor
+/// pattern as StockMovement.createdByUserId).
+model OrderStatusHistory {
+  id              String      @id @default(uuid(7)) @db.Uuid
+  orderId         String      @db.Uuid
+  previousStatus  OrderStatus
+  newStatus       OrderStatus
+  changedByUserId String?     @db.Uuid
+  reason          String?     @db.VarChar(255)
+
+  createdAt DateTime @default(now())
+
+  order         Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  changedByUser User? @relation(fields: [changedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@map("order_status_histories")
+}
+
+enum PaymentTransactionType {
+  AUTHORIZATION
+  CAPTURE
+  REFUND
+  VOID
+}
+
+/// One row per payment attempt against an Order, created inside Checkout's
+/// own transaction (checkout.repository.ts) — amount/currencyCode are always
+/// copied from the authoritative Order at creation, never client-supplied.
+/// A hand-added partial unique index (see the migration) allows multiple
+/// PENDING/FAILED/CANCELLED attempts per order (retry) but at most one
+/// AUTHORIZED/PAID at a time.
+model Payment {
+  id                String             @id @default(uuid(7)) @db.Uuid
+  orderId           String             @db.Uuid
+  provider          String             @db.VarChar(32) // "COD" | "MOCK"
+  method            String             @db.VarChar(32)
+  status            OrderPaymentStatus @default(PENDING)
+  amount            Int
+  currencyCode      String             @db.Char(3)
+  providerPaymentId String?            @db.VarChar(255)
+  idempotencyKey    String             @unique @db.VarChar(255)
+  paidAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order        Order                @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  transactions PaymentTransaction[]
+
+  @@index([orderId])
+  @@index([status])
+  @@map("payments")
+}
+
+/// Append-only event history — one row per authorization/capture/refund/void
+/// event, per the PRD's own "history, not overwrite" design for payment
+/// state. metadata is the raw provider payload, kept for audit/debugging
+/// only, never parsed for business logic.
+model PaymentTransaction {
+  id                String                 @id @default(uuid(7)) @db.Uuid
+  paymentId         String                 @db.Uuid
+  type              PaymentTransactionType
+  status            OrderPaymentStatus
+  amount            Int
+  providerReference String?                @db.VarChar(255)
+  metadata          Json?
+
+  createdAt DateTime @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@map("payment_transactions")
+}
+
+/// One row per inbound webhook delivery, keyed on the provider's own event
+/// id — the unique constraint on (provider, eventId) IS the idempotency
+/// mechanism: a duplicate delivery hits it and is a documented no-op, not an
+/// error. Kept forever (small, append-only, audit-relevant); no TTL/pruning
+/// infra exists or is added here.
+model PaymentWebhookEvent {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  provider   String   @db.VarChar(32)
+  eventId    String   @db.VarChar(255)
+  receivedAt DateTime @default(now())
+
+  @@unique([provider, eventId])
+  @@map("payment_webhook_events")
+}
+
+// ---------------------------------------------------------------------------
+// Shipping (Phase 4M) — ShippingMethod/Shipment only. ShippingZone is a
+// PRD-named but never-wired entity (its own ShippingMethod sketch has no
+// zoneId, and the PRD's rate formula never mentions Zone either) — building
+// it would be a purposeless orphan table, so it's deliberately not modelled;
+// see docs/modules/SHIPPING.md.
+// ---------------------------------------------------------------------------
+
+/// Reused for both Shipment.status and Order.shipmentStatus (the same
+/// "one shared enum, not a duplicate per-table one" precedent
+/// OrderPaymentStatus already established for Payment/Order). Reconciles the
+/// PRD's two internally-inconsistent Shipment status lists by adopting the
+/// later, formal enum pass (drops OUT_FOR_DELIVERY/FAILED, adds CANCELLED —
+/// "FAILED" delivery is folded into RETURNED). See docs/modules/SHIPPING.md.
+enum ShipmentStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  IN_TRANSIT
+  DELIVERED
+  RETURNED
+  CANCELLED
+  /// Post-cancellation outcomes: recorded on a shipment whose parent Order
+  /// was cancelled after the item had already left the warehouse, so staff
+  /// can track what actually happened to it. See docs/modules/SHIPPING.md.
+  ITEM_RETURNED
+  ITEM_LOST
+}
+
+/// Market-scoped shipping method/rate, per the PRD's own per-market shipping
+/// configuration requirement. `isActive` doubles as the soft-delete flag —
+/// DELETE /admin/shipping/methods/:id archives (isActive=false), it never
+/// hard-deletes, matching the PRD's own "safe to archive" classification and
+/// Catalog's existing archive-not-delete convention. No `zoneId` — see the
+/// section note above.
+model ShippingMethod {
+  id                    String  @id @default(uuid(7)) @db.Uuid
+  marketId              String  @db.Uuid
+  name                  String  @db.VarChar(100)
+  description           String? @db.VarChar(512)
+  /// Int minor units, same convention as every other monetary column.
+  baseRate              Int
+  freeShippingThreshold Int?
+  estimatedMinDays      Int?
+  estimatedMaxDays      Int?
+  isActive              Boolean @default(true)
+  /// False for methods that exist only to satisfy Shipment's required FK on
+  /// admin-entered offline orders (e.g. a seeded "Manual" method) — the
+  /// customer-facing shipping-methods list must filter isPublic: true so
+  /// these never appear at storefront checkout.
+  isPublic              Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  market    Market     @relation(fields: [marketId], references: [id], onDelete: Restrict)
+  shipments Shipment[]
+
+  @@index([marketId])
+  @@map("shipping_methods")
+}
+
+/// One row per Order (orderId @unique — the PRD has no ShipmentItem/partial-
+/// fulfillment concept, so this is a single-shipment-per-order model),
+/// created inside Checkout's own transaction alongside Payment (PENDING,
+/// mirroring that precedent exactly — the PRD names no POST /shipments
+/// route, so creation is implicit, not a standalone client action).
+/// `onDelete: Restrict` on orderId mirrors Payment's own posture: a
+/// fulfillment record shouldn't be silently orphaned by a hard-delete.
+model Shipment {
+  id               String         @id @default(uuid(7)) @db.Uuid
+  orderId          String         @unique @db.Uuid
+  shippingMethodId String         @db.Uuid
+  trackingNumber   String?        @db.VarChar(100)
+  carrier          String?        @db.VarChar(100)
+  status           ShipmentStatus @default(PENDING)
+  shippedAt        DateTime?
+  deliveredAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order          Order          @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  shippingMethod ShippingMethod @relation(fields: [shippingMethodId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([status])
+  @@map("shipments")
+}
+
+// ---------------------------------------------------------------------------
+// Returns (Phase 4N). PRD gives only a single conceptual flow (Return
+// Request -> Review -> Approved/Rejected -> Return Received -> Refund, §56)
+// with no schema, no eligibility rule beyond one transition label, and no
+// partial-return mechanics — see docs/modules/RETURNS.md for the full set of
+// PRD-silent decisions this domain had to make.
+// ---------------------------------------------------------------------------
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  RECEIVED
+  REFUNDED
+}
+
+/// Distinguishes a genuine customer submission from content an admin
+/// authored on a customer's behalf (ADMIN) or that was generated as
+/// development/demo content (SEED). Only CUSTOMER reviews can ever be
+/// `isVerifiedPurchase: true` — enforced in the service layer and by a
+/// DB-level CHECK constraint.
+enum ReviewSource {
+  CUSTOMER
+  ADMIN
+  SEED
+}
+
+/// Eligible only from Order.status = COMPLETED (not the PRD's literal
+/// DELIVERED example) — by COMPLETED, Orders' own DELIVERED->COMPLETED step
+/// has already fully released the reservation and decremented onHand, so
+/// this Return's inventory action at RECEIVED is always a simple, always-
+/// correct adjust(+quantity) restock, with no partial-reservation-release
+/// capability needed in Inventory. See docs/modules/RETURNS.md.
+model Return {
+  id      String       @id @default(uuid(7)) @db.Uuid
+  orderId String       @db.Uuid
+  status  ReturnStatus @default(REQUESTED)
+
+  reason          String? @db.VarChar(255)
+  rejectionReason String? @db.VarChar(255)
+  /// Populated once REFUNDED — sum(orderItem.unitAmount * quantity) over
+  /// this Return's items, computed from the immutable OrderItem snapshot,
+  /// never from current Catalog/Pricing. Kept here for audit clarity
+  /// alongside the PaymentTransaction it produced.
+  refundAmount    Int?
+
+  requestedByUserId String    @db.Uuid
+  reviewedByUserId  String?   @db.Uuid
+  reviewedAt        DateTime?
+  receivedAt        DateTime?
+  refundedAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order           Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  requestedByUser User         @relation("ReturnRequestedBy", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  reviewedByUser  User?        @relation("ReturnReviewedBy", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  items           ReturnItem[]
+
+  @@index([orderId])
+  @@index([status])
+  @@map("returns")
+}
+
+/// One row per returned OrderItem line, with the quantity being returned.
+/// `orderItemId` references the immutable checkout-time snapshot — price
+/// for refund calculation always comes from OrderItem.unitAmount, never
+/// re-derived.
+model ReturnItem {
+  id          String @id @default(uuid(7)) @db.Uuid
+  returnId    String @db.Uuid
+  orderItemId String @db.Uuid
+  quantity    Int
+
+  return    Return    @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  @@unique([returnId, orderItemId])
+  @@index([returnId])
+  @@index([orderItemId])
+  @@map("return_items")
+}
+
+// ---------------------------------------------------------------------------
+// Audit Log (Phase 4P) — append-only. No update/delete API exists anywhere
+// in this codebase for this model; immutability is architectural, not a DB
+// trigger. userId is nullable and onDelete: SetNull, matching the PRD's own
+// delete-rules table (audit logs must survive user deletion).
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  userId     String?  @db.Uuid
+  action     String   @db.VarChar(100)
+  entityType String   @db.VarChar(50)
+  entityId   String   @db.VarChar(64)
+  before     Json?
+  after      Json?
+  ipAddress  String?  @db.VarChar(45)
+  userAgent  String?  @db.VarChar(512)
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Admin notifications. Distinct from AuditLog: AuditLog is an append-only
+// actor-action trail with no recipient/read-state concept and no coverage of
+// organic (non-admin-initiated) events; this model is the real event feed
+// the admin navbar's bell renders, with per-admin read tracking.
+// @@unique([type, entityId]) is the dedup guarantee — emitting the same
+// event twice (e.g. a retried request) is a no-op, not a duplicate row.
+// ---------------------------------------------------------------------------
+
+enum NotificationType {
+  ORDER_PLACED
+  CUSTOMER_REGISTERED
+  PRODUCT_CREATED
+  CATEGORY_CREATED
+  REVIEW_SUBMITTED
+  PROMOTION_CREATED
+  ORDER_CANCELLED
+}
+
+model Notification {
+  id                 String           @id @default(uuid(7)) @db.Uuid
+  type               NotificationType
+  title              String           @db.VarChar(200)
+  message            String           @db.VarChar(500)
+  entityType         String           @db.VarChar(50)
+  entityId           String           @db.Uuid
+  requiredPermission String           @db.VarChar(100)
+  createdAt          DateTime         @default(now())
+
+  reads NotificationRead[]
+
+  @@unique([type, entityId])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model NotificationRead {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  notificationId String   @db.Uuid
+  userId         String   @db.Uuid
+  readAt         DateTime @default(now())
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationId, userId])
+  @@map("notification_reads")
+}
+
+/// Customer-facing notification feed — ownership-scoped (one row per
+/// customer per event), distinct from the admin Notification/NotificationRead
+/// pair above (which is permission-scoped and shared across admins).
+/// isRead/readAt are inline, not a join table, because visibility here is
+/// already 1:1 with userId — there is no "many admins, one event" fan-out to
+/// dedupe against. Populated from two sources: Orders' status-transition
+/// hook (ORDER_STATUS_CHANGED, one row per transition, per order's owning
+/// customer) and the admin Promotions module's manual broadcast action
+/// (PROMOTION, one row per customer per broadcast call).
+enum CustomerNotificationType {
+  ORDER_STATUS_CHANGED
+  PROMOTION
+
+  @@map("customer_notification_type")
+}
+
+model CustomerNotification {
+  id         String                   @id @default(uuid(7)) @db.Uuid
+  userId     String                   @db.Uuid
+  type       CustomerNotificationType
+  title      String                   @db.VarChar(200)
+  message    String                   @db.VarChar(500)
+  entityType String?                  @db.VarChar(50)
+  entityId   String?                  @db.Uuid
+  isRead     Boolean                  @default(false)
+  readAt     DateTime?
+  createdAt  DateTime                 @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, isRead])
+  @@map("customer_notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Contact (storefront Contact Us form). Submissions are stored for a future
+// admin inbox and emailed via the EmailProvider in the same request — see
+// docs/modules/CONTACT.md. status is a plain string, not an enum, to avoid
+// migration churn while the admin workflow around it is still undefined.
+// ---------------------------------------------------------------------------
+
+model ContactSubmission {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  fullName  String   @db.VarChar(100)
+  email     String   @db.VarChar(255)
+  phone     String?  @db.VarChar(30)
+  subject   String   @db.VarChar(30)
+  message   String
+  status    String   @default("new") @db.VarChar(20)
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([status])
+  @@map("contact_submissions")
+}
+
+// ---------------------------------------------------------------------------
+// Promotions (homepage Promotion Section — fully admin-controlled, no
+// hardcoded storefront content). Status (Draft/Scheduled/Active/Expired) is
+// deliberately NOT stored — it is computed at read time from isDraft +
+// startAt/endAt (see promotions.mapper.ts#computeStatus), the same
+// "computed, not stored" posture Inventory's `available` and Pricing's
+// resolveEffectivePrice already use, so there is no cron/scheduler needed for
+// a promotion to automatically become active/expired. displayLayout is a
+// per-promotion field (not a global site-wide switch) — see
+// promotions.service.ts#getActiveForHomepage for how multiple eligible
+// promotions resolve into one homepage rendering decision.
+// ---------------------------------------------------------------------------
+
+enum PromotionTargetType {
+  PRODUCT
+  CATEGORY
+}
+
+enum PromotionDisplayLayout {
+  SINGLE
+  GRID
+}
+
+model Promotion {
+  id               String                 @id @default(uuid(7)) @db.Uuid
+  overline         String?                @db.VarChar(100)
+  title            String                 @db.VarChar(200)
+  subtitle         String?                @db.VarChar(500)
+  badgeText        String?                @db.VarChar(50)
+  discountPercent  Int?
+  ctaText          String                 @default("Shop Now") @db.VarChar(50)
+  ctaLink          String?                @db.VarChar(2048)
+  imageUrl         String?                @db.VarChar(2048)
+  targetType       PromotionTargetType?
+  targetProductId  String?                @db.Uuid
+  targetCategoryId String?                @db.Uuid
+  displayLayout    PromotionDisplayLayout @default(SINGLE)
+  displayOrder     Int                    @default(0)
+  isDraft          Boolean                @default(true)
+  startAt          DateTime?
+  endAt            DateTime?
+
+  // Second grid card — only meaningful when displayLayout is GRID. All
+  // nullable: an unconfigured Grid 2 simply never renders a second card
+  // (see promotions.mapper.ts#toPublicPromotionResponse), and every row
+  // created before this field set existed just has nulls here — no
+  // migration backfill needed, no data loss, fully backward compatible.
+  grid2Overline         String?              @db.VarChar(100)
+  grid2Title            String?              @db.VarChar(200)
+  grid2Subtitle         String?              @db.VarChar(500)
+  grid2BadgeText        String?              @db.VarChar(50)
+  grid2DiscountPercent  Int?
+  grid2CtaText          String?              @db.VarChar(50)
+  grid2CtaLink          String?              @db.VarChar(2048)
+  grid2ImageUrl         String?              @db.VarChar(2048)
+  grid2TargetType       PromotionTargetType?
+  grid2TargetProductId  String?              @db.Uuid
+  grid2TargetCategoryId String?              @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Named relations: Product/Category each now have two distinct relations
+  // to Promotion (the grid-1 target and the grid-2 target), so Prisma
+  // requires both sides named and split into separate back-relation arrays.
+  targetProduct       Product?  @relation("PromotionTargetProduct", fields: [targetProductId], references: [id], onDelete: SetNull)
+  targetCategory      Category? @relation("PromotionTargetCategory", fields: [targetCategoryId], references: [id], onDelete: SetNull)
+  grid2TargetProduct  Product?  @relation("PromotionGrid2TargetProduct", fields: [grid2TargetProductId], references: [id], onDelete: SetNull)
+  grid2TargetCategory Category? @relation("PromotionGrid2TargetCategory", fields: [grid2TargetCategoryId], references: [id], onDelete: SetNull)
+
+  @@index([isDraft])
+  @@index([displayLayout])
+  @@map("promotions")
+}

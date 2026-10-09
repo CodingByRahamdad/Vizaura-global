@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:4001/api/v1/categories -o /dev/null -w \"backend: %{http_code}\\\\n\")",
+      "Bash(curl -s http://localhost:3000/products -o /dev/null -w \"frontend: %{http_code}\\\\n\")",
+      "Bash(mkdir -p \"C:/Users/DELL/AppData/Local/Temp/pw-5b4\")",
+      "Read(//c/Users/DELL/AppData/Local/Temp/**)",
+      "Bash(npm init *)",
+      "Bash(npm install *)"
+    ]
+  }
+}

@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+@theme {
+  /* Brand colors */
+  --color-primary: #0f766e;
+  --color-primary-dark: #115e59;
+  --color-primary-light: #ccfbf1;
+  --color-accent-green: #4d7c5a;
+
+  /* Brand surfaces (About page: pale sage section backgrounds, deep forest sections) */
+  --color-cream: #f1f5ea;
+  --color-forest: #0b3f38;
+
+  /* Neutrals / surfaces */
+  --color-bg: #fafaf7;
+  --color-surface: #ffffff;
+  --color-text: #17201d;
+  --color-text-secondary: #66736e;
+  --color-border: #e2e8e5;
+
+  /* Status */
+  --color-success: #2f855a;
+  --color-warning: #b7791f;
+  --color-error: #c53030;
+
+  /* Footer / dark chrome */
+  --color-footer: #0b1f1b;
+
+  /* Fonts */
+  --font-sans: var(--font-inter);
+  --font-serif: var(--font-playfair);
+  --font-mono: var(--font-geist-mono);
+
+  /* Radius */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+
+  /* Layout */
+  --container-max: 1280px;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+/* Thin, subtle horizontal scrollbar for cards/containers that genuinely need
+   to scroll (wide tables, tab rows) instead of the browser's default bulky
+   scrollbar. Firefox via scrollbar-width, Chromium/Safari via ::-webkit-*. */
+.scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  height: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: var(--color-border);
+  border-radius: var(--radius-sm);
+}
