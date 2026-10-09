@@ -43,3 +43,5 @@ Thumbs.db
 
 # Testing
 coverage/
+design-references/
+DEPLOYMENT_READINESS_REPORT.md
