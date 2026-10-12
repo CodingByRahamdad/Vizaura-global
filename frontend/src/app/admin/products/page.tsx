@@ -110,7 +110,6 @@ export default async function AdminProductsPage({ searchParams }: AdminProductsP
         <ProductRowActions
           productId={row.id}
           productName={row.name}
-          status={row.status}
           isActive={row.isActive}
           canUpdate={canUpdateProducts}
           canDelete={canDeleteProducts}

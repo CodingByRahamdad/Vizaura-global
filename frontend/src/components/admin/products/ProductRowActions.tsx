@@ -10,7 +10,6 @@ import { deleteProduct, setProductActive } from "@/lib/api/admin/products";
 interface ProductRowActionsProps {
   productId: string;
   productName: string;
-  status: string;
   isActive: boolean;
   canUpdate: boolean;
   canDelete: boolean;
@@ -19,7 +18,6 @@ interface ProductRowActionsProps {
 export function ProductRowActions({
   productId,
   productName,
-  status,
   isActive,
   canUpdate,
   canDelete,
@@ -56,8 +54,6 @@ export function ProductRowActions({
     }
   }
 
-  const canDeletePermanently = status === "ARCHIVED";
-
   const items: AdminRowActionItem[] = [];
   if (canUpdate) {
     items.push({
@@ -73,10 +69,6 @@ export function ProductRowActions({
     items.push({
       label: "Delete",
       destructive: true,
-      disabled: !canDeletePermanently,
-      disabledReason: canDeletePermanently
-        ? undefined
-        : `Only archived products can be deleted. Current status: ${status}.`,
       onSelect: () => setConfirmingDelete(true),
     });
   }

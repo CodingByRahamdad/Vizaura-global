@@ -17,10 +17,8 @@ interface ProductLifecycleActionsProps {
 /**
  * Archive (status -> ARCHIVED) is the primary "remove from catalog" action —
  * reversible, and already sufficient to hide from customers since the
- * storefront filters non-ACTIVE products. Hard delete is scoped in this UI
- * to DRAFT products only; the backend endpoint itself has no status check,
- * so this restriction is a UI convention, not a backend guarantee (see
- * docs/MODULE_STATUS.md's known-limitations note).
+ * storefront filters non-ACTIVE products. Delete is always a permanent hard
+ * delete, available regardless of status.
  */
 export function ProductLifecycleActions({ productId, status, canUpdate, canDelete }: ProductLifecycleActionsProps) {
   const router = useRouter();
@@ -81,9 +79,9 @@ export function ProductLifecycleActions({ productId, status, canUpdate, canDelet
             Restore to Draft
           </Button>
         ) : null}
-        {canDelete && status === "DRAFT" ? (
+        {canDelete ? (
           <Button variant="outline" size="sm" className="text-error" onClick={() => setConfirming("delete")}>
-            Delete Draft
+            Delete
           </Button>
         ) : null}
       </div>
@@ -99,8 +97,8 @@ export function ProductLifecycleActions({ productId, status, canUpdate, canDelet
       />
       <AdminConfirmDialog
         open={confirming === "delete"}
-        title="Delete this draft product?"
-        description="This permanently deletes the product. This cannot be undone."
+        title="Permanently delete this product?"
+        description="This permanently deletes the product and cannot be undone. Any customer reviews, wishlist entries, and live cart items referencing this product will also be permanently removed. Order history is preserved."
         confirmLabel="Delete"
         destructive
         isSubmitting={pendingAction === "delete"}

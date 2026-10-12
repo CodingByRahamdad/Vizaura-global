@@ -227,23 +227,13 @@ export class ProductsService {
     }
   }
 
-  /// A DRAFT product (never published) is soft-deleted — reversible in
-  /// principle, though nothing currently restores it. An ARCHIVED product
-  /// (already hidden from customers via the Archive action) may be
-  /// permanently, irreversibly removed. An ACTIVE product must be archived
-  /// first: archiving is the safe, reversible way to take a live product
-  /// out of circulation before its eventual hard delete.
+  /// Every product delete is a permanent hard delete, regardless of status,
+  /// to avoid accumulating storage from demo/stale catalog data. All
+  /// dependent relations are Cascade or SetNull in the schema (see
+  /// products.repository.ts's hardDelete), so this is always safe.
   async remove(id: string): Promise<void> {
-    const product = await this.assertExists(id);
-    if (product.status === "DRAFT") {
-      await this.productsRepository.softDelete(id);
-      return;
-    }
-    if (product.status === "ARCHIVED") {
-      await this.productsRepository.hardDelete(id);
-      return;
-    }
-    throw catalogErrors.notDeletable(product.status);
+    await this.assertExists(id);
+    await this.productsRepository.hardDelete(id);
   }
 
   async replaceCategories(productId: string, categoryIds: string[]): Promise<ProductDetail> {
