@@ -7,7 +7,7 @@ export interface ShopHeroContent {
 
 const SHOP_HERO_CONTENT: ShopHeroContent = {
   imageUrl:
-    "/about-us/shop.webp",
+    "/About-us/shop.webp",
   overline: "Premium Natural Products",
   heading: "Shop Our Natural Collection",
   description: "Discover authentic, high-quality natural products for a healthier, happier you.",

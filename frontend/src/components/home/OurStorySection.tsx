@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/Button";
 import { SafeImage } from "@/components/ui/SafeImage";
 
 const STORY_IMAGE_URL =
-  "/about-us/home.webp";
+  "/About-us/home.webp";
 
 const VALUE_COLUMNS = [
   { icon: Leaf, title: "Natural & Pure", subtitle: "No harmful chemicals" },

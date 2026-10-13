@@ -7,7 +7,7 @@ export interface CartHeroContent {
 
 const CART_HERO_CONTENT: CartHeroContent = {
   imageUrl:
-    "/about-us/cart.webp",
+    "/About-us/cart.webp",
   overline: "Your Cart",
   heading: "Good Things\nAre Worth the Wait",
   description: "Your natural wellness journey is just a step away.",

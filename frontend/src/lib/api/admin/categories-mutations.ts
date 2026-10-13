@@ -59,9 +59,11 @@ export async function deleteCategory(id: string): Promise<void> {
   );
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL || "https://vizaura-backend.onrender.com/api/v1";
 const CSRF_HEADER_NAME = "x-requested-with";
 const CSRF_HEADER_VALUE = "XMLHttpRequest";
+const UPLOAD_TIMEOUT_MS = 30000;
 
 /**
  * Multipart upload — deliberately bypasses apiFetch, which always forces
@@ -82,6 +84,7 @@ export async function uploadCategoryImage(file: File): Promise<{ url: string }> 
       credentials: "include",
       headers: { [CSRF_HEADER_NAME]: CSRF_HEADER_VALUE },
       body: form,
+      signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
     });
 
     const raw = await res.text();

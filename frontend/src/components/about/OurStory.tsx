@@ -5,7 +5,7 @@ import { SafeImage } from "@/components/ui/SafeImage";
 import { AboutSectionHeader } from "@/components/about/AboutSectionHeader";
 
 const STORY_IMAGE_URL =
-  "/about-us/about-1.webp";
+  "/About-us/about-1.webp";
 
 /**
  * Plain bounded image (not OurStorySection's full-bleed text-overlay

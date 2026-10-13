@@ -22,7 +22,7 @@ export function ImpactSection() {
     <Section aria-labelledby="impact-heading" className="relative overflow-hidden bg-forest py-14 md:py-20">
       <div aria-hidden className="absolute inset-0">
         <SafeImage
-          src="/about-us/about-4.webp"
+          src="/About-us/about-4.webp"
           alt=""
           fallback={<span />}
           className="absolute inset-0 object-top opacity-99"

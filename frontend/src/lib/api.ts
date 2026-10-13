@@ -1,6 +1,12 @@
 import type { ApiEnvelope } from "@/lib/types/api";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+// Falls back to the production backend so a missing/misnamed
+// NEXT_PUBLIC_API_BASE_URL on Vercel can never silently turn every request
+// into a relative-path fetch against the frontend's own origin.
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL || "https://vizaura-backend.onrender.com/api/v1";
+
+const REQUEST_TIMEOUT_MS = 8000;
 
 /**
  * The backend's CSRF middleware (backend/src/middleware/csrf.ts) requires
@@ -34,11 +40,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<ApiEnvelope
     headers.set(CSRF_HEADER_NAME, CSRF_HEADER_VALUE);
   }
 
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    credentials: "include",
-    ...init,
-    headers,
-  });
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      credentials: "include",
+      ...init,
+      headers,
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new ApiError("Request timed out", 0, "TIMEOUT");
+    }
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiError("Request aborted", 0, "ABORTED");
+    }
+    throw new ApiError("Network error", 0, "NETWORK_ERROR");
+  }
 
   // 204 No Content (e.g. POST /auth/logout) has no body to parse; a bare
   // ok+empty response is treated as a bodyless success.

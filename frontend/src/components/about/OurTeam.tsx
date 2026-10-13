@@ -10,7 +10,7 @@ export function OurTeam() {
       <Container className="grid grid-cols-1 items-center gap-8 lg:grid-cols-2 lg:gap-14">
         <div className="relative aspect-[4/3] w-full overflow-hidden rounded-xl">
           <SafeImage
-            src="/about-us/about-3.webp"
+            src="/About-us/about-3.webp"
             alt="Members of the VIZAURA community enjoying a natural, balanced lifestyle"
             className="absolute inset-0 object-[65%_center]"
           />

@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local change log (untracked — see docs/CHANGELOG.md for the tracked one)
+CHANGELOG.md
