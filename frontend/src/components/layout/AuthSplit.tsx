@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic';
 import type { ComponentType, ReactNode, SVGProps } from "react";
 import { Card } from "@/components/ui/Card";
 import { SafeImage } from "@/components/ui/SafeImage";
