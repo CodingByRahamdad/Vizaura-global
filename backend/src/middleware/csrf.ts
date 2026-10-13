@@ -27,10 +27,10 @@ export const csrfProtection: RequestHandler = (req: Request, res: Response, next
     return;
   }
 
-  const allowedOrigin = parseOrigin(env.frontendUrl);
+  const allowedOrigins = new Set(env.allowedOrigins.map(parseOrigin));
   const requestOrigin = parseOrigin(req.headers.origin) ?? parseOrigin(req.headers.referer);
 
-  if (!allowedOrigin || !requestOrigin || requestOrigin !== allowedOrigin) {
+  if (!requestOrigin || !allowedOrigins.has(requestOrigin)) {
     next(authErrors.csrfFailed());
     return;
   }

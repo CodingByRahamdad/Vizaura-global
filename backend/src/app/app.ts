@@ -27,7 +27,14 @@ export function createApp() {
   app.use(securityHeaders);
   app.use(
     cors({
-      origin: env.frontendUrl,
+      origin: (origin, callback) => {
+        // Mirrors the previous fixed-string behavior: a non-matching origin
+        // just gets no Access-Control-Allow-Origin header (the request still
+        // reaches csrfProtection, which is the actual enforcement layer) —
+        // it must never throw, which would turn every cross-origin GET into
+        // a 500.
+        callback(null, !origin || env.allowedOrigins.includes(origin));
+      },
       credentials: true,
       methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
       allowedHeaders: ["Content-Type", env.csrfHeaderName, "Idempotency-Key"],

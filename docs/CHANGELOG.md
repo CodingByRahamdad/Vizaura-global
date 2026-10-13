@@ -2,6 +2,13 @@
 
 Concise chronological log of meaningful project changes. Do not let this grow into a duplicate of git history — one entry per meaningful milestone.
 
+## 2026-10-13 — Backend CORS/CSRF multi-origin support
+
+- Audited a 3-part change request (changelog logging, a frontend env-var rename, backend CORS). The env-var rename (`NEXT_PUBLIC_API_URL` → `NEXT_PUBLIC_API_BASE_URL`) was a no-op: the old name doesn't exist anywhere in the repo — the frontend already uses `NEXT_PUBLIC_API_BASE_URL` with the requested fallback everywhere.
+- The backend's CORS and CSRF middleware each only ever recognized a single configured origin (`FRONTEND_URL`), so no production domain besides the deployed frontend could call the API with credentials. Added `ALLOWED_ORIGINS` (optional CSV env var) to `backend/src/config/env.ts`, computing `env.allowedOrigins` (always includes `FRONTEND_URL`; defaults to `localhost:3000` + the three production domains when unset). Both `backend/src/app/app.ts`'s `cors()` config and `backend/src/middleware/csrf.ts`'s Origin/Referer check now validate against this same list, keeping them in sync — fixing only one would have left non-GET requests from production domains failing CSRF even after CORS allowed them.
+- Deliberately rejected two unsafe parts of the originally-requested change: an `else { callback(null, true) }` CORS fallback that would have allowed any origin regardless of the whitelist, and a `*.vercel.app` wildcard (kept to an exact-match list per explicit decision).
+- Verification: backend `lint`/`tsc build` clean; `tests/integration/security.test.ts` 17/17 passing (one interim regression caught and fixed — a non-matching origin must not throw/500, only skip the CORS header, same as the original fixed-string behavior); full backend suite re-run to confirm no other regressions. Frontend untouched aside from its own local `CHANGELOG.md`.
+
 ## 2026-10-08 — Cart page visual redesign
 
 - Rebuilt `/cart` to match a provided design spec/reference image (hero banner, two-column Shopping Cart + Order Summary, "You Might Also Like"), entirely on the existing cart/pricing/inventory/shipping/checkout/wishlist backend — confirmed with user: no coupon/discount-code system exists (`checkout.service.ts` already rejects any coupon code), so the design's coupon field was omitted rather than built from scratch.

@@ -6,6 +6,14 @@ import { z } from "zod";
 const DEV_JWT_SECRET = "dev-only-insecure-jwt-secret-change-me-32b";
 const DEV_MOCK_WEBHOOK_SECRET = "dev-only-insecure-mock-webhook-secret";
 
+// Used when ALLOWED_ORIGINS is unset. Exact-match only — no wildcard subdomains.
+const DEFAULT_ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "https://vizaura-global.vercel.app",
+  "https://vizauraglobal.com",
+  "https://www.vizauraglobal.com",
+];
+
 const schema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -13,6 +21,9 @@ const schema = z
 
     FRONTEND_URL: z.url().default("http://localhost:3000"),
     APP_URL: z.url().optional(),
+    // Comma-separated list of additional origins allowed for CORS + CSRF
+    // (e.g. production Vercel/custom domains), on top of FRONTEND_URL.
+    ALLOWED_ORIGINS: z.string().min(1).optional(),
 
     DATABASE_URL: z.string().min(1).optional(),
     DATABASE_URL_TEST: z.string().min(1).optional(),
@@ -176,6 +187,16 @@ export const env = {
   frontendUrl: raw.FRONTEND_URL,
   /// Origin used to build links in outbound email.
   appUrl: raw.APP_URL ?? raw.FRONTEND_URL,
+  /// Origins allowed for CORS + CSRF. Always includes FRONTEND_URL; falls
+  /// back to DEFAULT_ALLOWED_ORIGINS when ALLOWED_ORIGINS is unset.
+  allowedOrigins: Array.from(
+    new Set([
+      raw.FRONTEND_URL,
+      ...(raw.ALLOWED_ORIGINS
+        ? raw.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim())
+        : DEFAULT_ALLOWED_ORIGINS),
+    ]),
+  ),
 
   databaseUrl: isTest ? (raw.DATABASE_URL_TEST ?? raw.DATABASE_URL) : raw.DATABASE_URL,
   databaseUrlTest: raw.DATABASE_URL_TEST,
