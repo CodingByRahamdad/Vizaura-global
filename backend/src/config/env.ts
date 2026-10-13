@@ -73,6 +73,18 @@ const schema = z
       .enum(["true", "false"])
       .transform((v) => v === "true")
       .optional(),
+
+    // Opt-in super_admin bootstrap — see backend/src/security/adminBootstrap.ts.
+    // No-op unless BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD are both
+    // set, so it is safe to leave wired into every server startup.
+    BOOTSTRAP_ADMIN_EMAIL: z.string().email().optional(),
+    BOOTSTRAP_ADMIN_PASSWORD: z.string().min(1).optional(),
+    BOOTSTRAP_ADMIN_FIRST_NAME: z.string().min(1).default("Super"),
+    BOOTSTRAP_ADMIN_LAST_NAME: z.string().min(1).default("Admin"),
+    SEED_ALLOW_ADMIN_BOOTSTRAP: z
+      .enum(["true", "false"])
+      .transform((v) => v === "true")
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (value.EMAIL_PROVIDER === "brevo") {
@@ -151,14 +163,15 @@ const schema = z
         message: "is required when CAPTCHA_PROVIDER=recaptcha",
       });
     }
-    if (value.COOKIE_SAMESITE === "none" && !value.COOKIE_DOMAIN) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["COOKIE_SAMESITE"],
-        message:
-          "SameSite=none implies cross-site cookies, which require the double-submit CSRF strategy; see docs/AUTH_SECURITY.md",
-      });
-    }
+    // Note: COOKIE_SAMESITE=none deliberately does NOT require COOKIE_DOMAIN.
+    // COOKIE_DOMAIN only matters when the frontend and API share a parent
+    // domain (subdomain cookie sharing); when they're on unrelated
+    // registrable domains (e.g. a Vercel frontend + a Render backend),
+    // COOKIE_DOMAIN must stay unset so the cookie remains host-only — a
+    // Domain attribute cannot bridge two unrelated domains at all. CSRF
+    // defense in that case comes from the Origin-header check + required
+    // custom header in middleware/csrf.ts, which is independent of
+    // SameSite. See docs/AUTH_SECURITY.md.
   });
 
 const parsed = schema.safeParse(process.env);
@@ -257,6 +270,14 @@ export const env = {
   trustProxyHops: raw.TRUST_PROXY_HOPS,
   csrfHeaderName: raw.CSRF_HEADER_NAME.toLowerCase(),
   rateLimitEnabled: raw.RATE_LIMIT_ENABLED ?? !isTest,
+
+  adminBootstrap: {
+    email: raw.BOOTSTRAP_ADMIN_EMAIL,
+    password: raw.BOOTSTRAP_ADMIN_PASSWORD,
+    firstName: raw.BOOTSTRAP_ADMIN_FIRST_NAME,
+    lastName: raw.BOOTSTRAP_ADMIN_LAST_NAME,
+    allowInProduction: raw.SEED_ALLOW_ADMIN_BOOTSTRAP ?? false,
+  },
 } as const;
 
 export type Env = typeof env;

@@ -99,7 +99,10 @@ No `Domain` attribute on either cookie — both are **host-only**, scoped to whi
 
 The refresh cookie's restricted path means it is never sent on ordinary API calls, shrinking its exposure.
 
-**This assumes the frontend and API share a parent domain in production** (e.g. `app.vizaura.com` + `api.vizaura.com`). If that ever changes to unrelated registrable domains, cookies must move to `SameSite=None; Secure`, `COOKIE_SAMESITE=none` requires `COOKIE_DOMAIN` to be set (enforced by `env.ts`), and CSRF must switch to a double-submit token — the cookie layer is config-driven specifically so this is a configuration change, not a redesign.
+**Supports both same-parent-domain and unrelated-domain deployments, as a configuration change, not a redesign:**
+
+- Same parent domain (e.g. `app.vizaura.com` + `api.vizaura.com`): `COOKIE_SAMESITE=lax` (default) works as-is; `COOKIE_DOMAIN` may optionally be set to share the cookie across subdomains.
+- Unrelated registrable domains (e.g. a Vercel frontend + a Render backend, the current production topology): `COOKIE_SAMESITE=none`, `secure` already follows from `NODE_ENV=production`. `COOKIE_DOMAIN` must stay **unset** — a `Domain` attribute can only extend a cookie across subdomains of the *same* registrable domain, it cannot bridge two unrelated domains, so the cookie stays host-only exactly as in the same-domain case. `env.ts` does not require `COOKIE_DOMAIN` when `COOKIE_SAMESITE=none`.
 
 ## CORS
 
@@ -107,12 +110,12 @@ Exact allowlist from `FRONTEND_URL` (never `*`, never origin reflection), `crede
 
 ## CSRF
 
-Cookie-based auth needs CSRF protection independent of `HttpOnly`. `SameSite=Lax` already blocks the cookie on cross-site requests (every mutating route in this API is POST/PATCH/DELETE; `Lax` only exempts top-level GET navigations, and no GET here has a side effect). `backend/src/middleware/csrf.ts` adds two stateless, defense-in-depth checks on every non-GET/HEAD/OPTIONS request:
+Cookie-based auth needs CSRF protection independent of `HttpOnly`. When `COOKIE_SAMESITE=lax` (same-parent-domain deployments), `SameSite=Lax` already blocks the cookie on cross-site requests (every mutating route in this API is POST/PATCH/DELETE; `Lax` only exempts top-level GET navigations, and no GET here has a side effect). `backend/src/middleware/csrf.ts` adds two stateless checks on every non-GET/HEAD/OPTIONS request, which apply **regardless of `SameSite`** and so remain the primary CSRF defense when `COOKIE_SAMESITE=none` (unrelated-domain deployments, where `SameSite` provides no CSRF protection on its own):
 
-1. `Origin` (falling back to `Referer`) must match `FRONTEND_URL` exactly.
-2. A custom request header (`CSRF_HEADER_NAME`, default `x-requested-with`) must be present — a cross-site form post cannot attach a custom header without triggering a CORS preflight this API will refuse.
+1. `Origin` (falling back to `Referer`) must match an allowed origin exactly (`env.allowedOrigins`) — the browser sets this header and it cannot be spoofed or omitted by a cross-site `fetch`/form submission.
+2. A custom request header (`CSRF_HEADER_NAME`, default `x-requested-with`) must be present — a cross-site form post cannot attach a custom header without triggering a CORS preflight this API will refuse, and this check does not depend on cookies or `SameSite` at all.
 
-No CSRF token store is needed because both checks are stateless. Residual risk is XSS on a sibling subdomain of the same registrable domain — host-only cookies (no `Domain` attribute) are the mitigation for that.
+No CSRF token store (double-submit or otherwise) is needed because both checks are stateless and already independent of `SameSite` — this is why moving to `COOKIE_SAMESITE=none` for an unrelated-domain deployment is a configuration change, not a new CSRF mechanism. Residual risk is XSS on a sibling subdomain of the same registrable domain — host-only cookies (no `Domain` attribute) are the mitigation for that.
 
 ### Local development origin — part of the contract, not a preference
 
@@ -154,6 +157,10 @@ All secrets (`DATABASE_URL`, `JWT_ACCESS_SECRET`, `TURNSTILE_SECRET_KEY`, etc.) 
 ## Audit Logging (implemented — Phase 4P)
 
 Sensitive actions across Auth, RBAC, Orders, Payments, Shipping, Returns, and Inventory are recorded to the `AuditLog` table (append-only — no update/delete route exists anywhere for it), readable only via `GET /api/v1/admin/audit-logs` (`audit:read`, super_admin only). See [modules/AUDITLOG.md](modules/AUDITLOG.md) for the schema and full write-wiring table.
+
+## Super_admin Bootstrap
+
+`backend/src/security/adminBootstrap.ts` provisions the first `super_admin` account from `BOOTSTRAP_ADMIN_EMAIL`/`BOOTSTRAP_ADMIN_PASSWORD`. It runs automatically on every backend startup (`src/server.ts`, awaited before `app.listen`) **and** is callable manually (`npm run db:seed:admin`, `prisma/seed-admin.ts`) — both paths share the same function. It is a no-op whenever those two env vars aren't both set, which is why it's safe to leave wired into every startup rather than only invoked ad hoc. Guards (unchanged from the original manual-only script): refuses to run in production unless `SEED_ALLOW_ADMIN_BOOTSTRAP=true`; never creates a second `super_admin` (checked by role membership, not email); never overwrites an existing user's password; requires the `super_admin` role to already exist (`npm run db:seed` first); validates the password against the normal password policy. Never logs the password. This is unrelated to `prisma/seed.ts`, which never creates any user and is exercised by `tests/integration/seed-guard.test.ts` to assert exactly that.
 
 ## Admin Security
 

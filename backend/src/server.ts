@@ -1,8 +1,11 @@
 import { createApp } from "./app/app.js";
 import { env } from "./config/env.js";
-import { disconnectPrisma } from "./db/prismaClient.js";
+import { disconnectPrisma, getPrismaClient } from "./db/prismaClient.js";
+import { bootstrapSuperAdmin } from "./security/adminBootstrap.js";
 
 const app = createApp();
+
+await bootstrapSuperAdmin(getPrismaClient());
 
 const server = app.listen(env.port, () => {
   console.log(`VIZAURA GLOBAL backend listening on port ${env.port} (${env.nodeEnv})`);

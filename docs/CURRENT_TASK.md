@@ -2,41 +2,35 @@
 
 > This file always reflects the single active task. Keep it focused (see [DEVELOPMENT_RULES.md](DEVELOPMENT_RULES.md), rule 20).
 
-**Task:** Rebuilt the Cart page (`/cart`) to match a provided design spec + reference image (hero banner, two-column Shopping Cart + Order Summary, "You Might Also Like" recommendations), entirely on top of the existing cart/pricing/inventory/shipping/checkout/wishlist backend.
+**Task:** Fixed a real cross-domain cookie gap and added an opt-in admin-bootstrap startup hook, after auditing a 5-part pasted change request that assumed several things (no `localStorage`, Bearer-header fallback, single `token` cookie, auto-admin-bootstrap) that either already existed in a more correct form or would have weakened this repo's cookie-only, permission-based auth model.
 
-**Status:** COMPLETE at the code/API/test level. Backend `tsc --noEmit`/`npm run lint` clean, `tests/integration/cart.test.ts` re-run: 36/36 passing. Frontend `tsc --noEmit`/`npm run lint` clean. Both dev servers confirmed serving the rebuilt page (hero text and empty-cart state fetched via `curl`) with no server error. Manual browser QA not performed (no browser tool in this environment — see below).
+**Status:** COMPLETE at the code/build/test level.
 
 ## Decisions made (confirmed with user before implementing)
 
-1. **Coupon/discount-code UI** = omitted entirely. The design reference shows a "Have a discount code?" field, but audit found no coupon/promo-code backend exists anywhere in the project — `checkout.service.ts` explicitly throws `couponUnsupported()` if a code is ever passed, and the only "promotion" concept is marketing banners, not redeemable codes. Building a real coupon system was judged out of scope for a visual redesign task.
-2. **Cart line original-price/discount-%** = backend extended to expose it (not faked on the frontend). `resolveEffectivePrice()` in the pricing service already resolves both the pre-sale amount and the effective (sale) amount internally; `CartItemView` just didn't surface them. Extended `cart.mapper.ts`/`cart.service.ts`/`cart.repository.ts` to expose `originalAmount`/`discountPercent` (only non-null while a sale is actually active), using the same rounding formula the storefront's product-card discount badge already uses.
+1. **Frontend/login-verification changes** = none. Audit found the frontend already has no `localStorage`, already sends `credentials: "include"` globally, and already redirects by permission (`hasAdminAccess`), not role string; login/register already correctly distinguish unverified customers (allowed in) from unverified staff (blocked, 403). Adding `localStorage`/`Authorization: Bearer` was rejected as a regression against the "never localStorage" rule.
+2. **Cross-domain cookies** = fix the real gap confirmed with the user (production frontend and backend are on unrelated registrable domains, no shared parent domain) by relaxing `backend/src/config/env.ts`'s validation rather than building a new CSRF mechanism. The existing Origin-header + custom-header checks in `middleware/csrf.ts` are already independent of `SameSite` and remain sufficient defense under `SameSite=None` — confirmed by re-reading `docs/AUTH_SECURITY.md`'s own CSRF rationale.
+3. **Admin bootstrap** = user chose an opt-in, guarded startup hook (reusing `prisma/seed-admin.ts`'s exact safety rails) over a one-off ops command, since one-off commands are impractical on their hosting setup.
 
 ## What was built
 
-**1. Backend (`backend/src/modules/cart/`) — additive, no schema migration.**
-- `cart.repository.ts`: `cartWithItemsInclude` now also includes each line's `product.media` (ordered `isPrimary desc, position asc`, `take: 1`) — the same primary-image pattern `catalog/products.repository.ts` already uses.
-- `cart.mapper.ts`: `CartItemView` gained `productId`, `productSlug`, `productName`, `variantTitle`, `imageUrl`, `originalAmount`, `discountPercent`.
-- `cart.service.ts#buildItemView`: populates the new fields from data already joined/resolved per line (no new query) — `originalAmount`/`discountPercent` only set when `resolveEffectivePrice().isOnSale` is true.
-- `frontend/src/lib/types/cart.ts`: mirrored verbatim.
+**Backend.**
+- New `backend/src/security/adminBootstrap.ts` — `bootstrapSuperAdmin(prisma)`, extracted from `prisma/seed-admin.ts`. No-op unless `BOOTSTRAP_ADMIN_EMAIL`/`BOOTSTRAP_ADMIN_PASSWORD` are both set; refuses production unless `SEED_ALLOW_ADMIN_BOOTSTRAP=true`; no-op if a `super_admin` already exists (role-membership check, not email); never overwrites an existing user. Returns a status value (`"bootstrapped" | "already_exists" | "not_configured" | "production_guard" | "invalid_password" | "role_missing" | "error"`).
+- `backend/src/server.ts` — awaits `bootstrapSuperAdmin(getPrismaClient())` after `createApp()`, before `app.listen`.
+- `backend/prisma/seed-admin.ts` — now a thin CLI wrapper around the shared function; sets `process.exitCode = 1` for any non-success status, matching its prior manual-run behavior.
+- `backend/src/config/env.ts` — added `BOOTSTRAP_ADMIN_EMAIL`/`BOOTSTRAP_ADMIN_PASSWORD`/`BOOTSTRAP_ADMIN_FIRST_NAME`/`BOOTSTRAP_ADMIN_LAST_NAME`/`SEED_ALLOW_ADMIN_BOOTSTRAP` to the validated schema (`env.adminBootstrap`); removed the `superRefine` rule that required `COOKIE_DOMAIN` whenever `COOKIE_SAMESITE=none`.
+- `backend/.env.example` — updated comments for both the cookie topology choice and the (now dual CLI+startup) admin bootstrap.
 
-**2. Frontend.**
-- `components/cart/CartHero.tsx` + `cartHeroContent.ts` (new) — full-bleed hero banner ("YOUR CART" / "Good Things Are Worth the Wait" / subtext over an image), following the exact same static-content-function precedent as `catalog/ShopHero.tsx`/`shopHeroContent.ts` (no CMS/Banner model backs cart-specific content yet).
-- `app/(storefront)/cart/page.tsx` — renders `<CartHero />` full-width above the container, drops the old plain heading.
-- `components/cart/CartView.tsx` (rebuilt) — two-column layout:
-  - Left "Shopping Cart" card: header (title + item count + "Continue Shopping →"), a Product/Price/Quantity/Total table-header strip, redesigned item rows (thumbnail, product name linking to the PDP, variant subtitle, a stock pill driven by the existing real `isAvailable`/`isInStock` flags, current price + struck-through original + "Save N%" badge when a sale is active, the existing `QuantityStepper` wired to `updateItem`, line total, remove button wired to `removeItem`), "Clear Cart" retained.
-  - Right "Order Summary" card: subtotal, a shipping row computed the same way `CheckoutView.tsx` already does (fetch `getShippingMethods(marketCode)`, compare the real `freeShippingThreshold` against `cart.subtotalAmount` — no new formula), total, a free-shipping notice using that same real threshold, a "Proceed to Checkout →" button that just navigates to `/checkout` (Checkout independently re-reads the same shared `useCartWishlist()` cart — no payload passed, no new checkout logic), and a static trust-indicator row (Secure Checkout / Easy Returns / 24/7 Support — no backend content source exists for this copy).
-  - No coupon section (per decision #1 above).
-  - All loading/error/empty/unauthenticated states and "Clear Cart" kept as they already were.
-- `components/cart/CartRecommendations.tsx` (new) — no per-cart recommendation endpoint exists in Catalog (confirmed by audit); reuses the same `getProductCards()` call `RelatedProducts.tsx` already makes on the product detail page (without a single-category filter, since a cart can span many categories), excludes products already in the cart, renders through the existing `ProductCard` grid unchanged — wishlist heart, rating, price/compare-at, and Add to Cart all come for free.
+**Docs.** `docs/AUTH_SECURITY.md` — Cookies section now describes both same-parent-domain and unrelated-domain topologies; CSRF section clarifies the Origin+custom-header checks are `SameSite`-independent and already cover the unrelated-domain case (no double-submit-token mechanism added); new "Super_admin Bootstrap" section.
+
+**Frontend.** No changes — audited and confirmed already correct.
 
 ## Verification performed
 
-Backend: `tsc --noEmit` and `npm run lint` clean. `npx vitest run tests/integration/cart.test.ts` — 36/36 passing (no existing test asserted the full `CartItemView` shape, so none needed updating).
+Backend: `npm run build` (prisma generate + tsc) clean, `npm run lint` clean. `npx vitest run tests/integration/seed-guard.test.ts` — 2/2 passing (confirms the new startup hook doesn't affect `prisma/seed.ts`'s "fresh production seed creates zero users" invariant — that test never goes through `server.ts`). `npx vitest run tests/integration/auth` — 56/56 passing. Full suite re-run: 4 pre-existing/unrelated failures (`catalog.products.test.ts`, `customers.test.ts`, `catalog.categories.admin.test.ts`, `requireCaptcha.test.ts` — none touch auth, cookies, or env), consistent with flakiness already noted in the 2026-10-08 changelog entry.
 
-Frontend: `tsc --noEmit` and `npm run lint` clean.
+Frontend: `npm run build` clean (no frontend files changed by this task).
 
-Live: both dev servers (already running) confirmed serving the rebuilt page — `GET /api/v1/health` returned `ok`, and `curl http://localhost:3000/cart` returned the new hero copy ("Good Things" / "Your natural wellness journey is just a step away.") and the empty-cart `EmptyState` with no server error.
+## Not performed — out of scope for this task
 
-## Not performed — genuinely blocked
-
-- Interactive browser QA: logging in as a seeded customer, adding real products (including one on an active sale) to the cart, and visually confirming the populated two-column layout against the reference image, the real free-shipping threshold for both PKR and AED, the "Proceed to Checkout" → Checkout handoff, "You Might Also Like" exclusion logic, and mobile stacking/no-horizontal-scroll. No headless-browser tool (`chromium-cli`, Playwright, Puppeteer) is available in this environment, and installing one wasn't part of the approved plan. The manual end-to-end steps from the implementation plan have not been run against a live browser session — recommend the user open `http://localhost:3000/cart` themselves to confirm visual fidelity.
+- Actually setting `COOKIE_SAMESITE=none` / `ALLOWED_ORIGINS` / `FRONTEND_URL` / `BOOTSTRAP_ADMIN_EMAIL` etc. in the real production environment (Vercel/Render dashboards) — that's an ops action for the user to perform, not a code change.
