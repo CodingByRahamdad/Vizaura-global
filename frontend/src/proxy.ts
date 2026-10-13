@@ -7,11 +7,19 @@ import { NextRequest, NextResponse } from "next/server";
 // for nonces); this app's pages are already SSR/session-gated, so nothing
 // here was statically optimized to begin with.
 
+// Product/category/promotion images are absolute URLs served directly from
+// the backend's own host (backend/src/modules/catalog/mediaStorage.ts) —
+// never proxied through next.config.ts's rewrite. So this must resolve the
+// backend's real origin even when NEXT_PUBLIC_API_BASE_URL is set to a
+// relative path ("/api/v1", in production — see lib/api.ts), which `new
+// URL()` can't parse on its own. API_BASE_URL_INTERNAL is always absolute.
 function apiOrigin(): string {
   try {
-    return new URL(
-      process.env.NEXT_PUBLIC_API_BASE_URL || "https://vizaura-backend.onrender.com/api/v1"
-    ).origin;
+    const raw =
+      process.env.API_BASE_URL_INTERNAL ||
+      process.env.NEXT_PUBLIC_API_BASE_URL ||
+      "https://vizaura-backend.onrender.com/api/v1";
+    return new URL(raw).origin;
   } catch {
     return "";
   }

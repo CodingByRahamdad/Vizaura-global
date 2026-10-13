@@ -1,10 +1,15 @@
 import type { ApiEnvelope } from "@/lib/types/api";
 
-// Falls back to the production backend so a missing/misnamed
-// NEXT_PUBLIC_API_BASE_URL on Vercel can never silently turn every request
-// into a relative-path fetch against the frontend's own origin.
+// Client-side requests go through the same-origin Vercel rewrite in
+// next.config.ts (first-party cookies). Server-side requests (Server
+// Components, via lib/api/auth-server.ts and lib/api/server-fetch.ts) run in
+// Node with no browsing context to resolve a relative URL against, so they
+// always need an absolute backend URL — they already work today via manual
+// Cookie-header forwarding, independent of same-origin/SameSite.
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "https://vizaura-backend.onrender.com/api/v1";
+  typeof window === "undefined"
+    ? process.env.API_BASE_URL_INTERNAL || "https://vizaura-backend.onrender.com/api/v1"
+    : process.env.NEXT_PUBLIC_API_BASE_URL || "/api/v1";
 
 const REQUEST_TIMEOUT_MS = 8000;
 
