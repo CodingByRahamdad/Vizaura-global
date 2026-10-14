@@ -535,13 +535,19 @@ model VariantOptionValue {
   @@map("variant_option_values")
 }
 
-/// Media reference only — no storage-provider integration lives here.
+/// Media reference, plus an opaque delete handle for whichever provider
+/// (backend/src/integrations/media/) created the row via upload.
 model ProductMedia {
   id        String    @id @default(uuid(7)) @db.Uuid
   productId String    @db.Uuid
   variantId String?   @db.Uuid
   type      MediaType @default(IMAGE)
   url       String    @db.VarChar(2048)
+  /// The media provider's delete handle (Cloudinary public_id, or the local
+  /// provider's own relative URL) — set only for rows created via the
+  /// upload endpoint; null for an externally-pasted URL row, which must
+  /// never be deleted as a side effect of removing this row.
+  mediaPublicId String? @db.VarChar(512)
   altText   String?   @db.VarChar(255)
   position  Int       @default(0)
   isPrimary Boolean   @default(false)

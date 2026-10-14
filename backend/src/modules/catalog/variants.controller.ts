@@ -3,7 +3,8 @@ import { VariantsService } from "./variants.service.js";
 import { toMediaResponse, toOptionResponse, toOptionValueResponse, toVariantResponse } from "./variants.mapper.js";
 import { successResponse } from "../../utils/apiResponse.js";
 import { catalogErrors } from "../../errors/AppError.js";
-import { buildProductMediaUrl, deleteProductUploadIfOwned } from "./mediaStorage.js";
+import { toAbsoluteMediaUrl, extensionFor } from "./mediaUpload.middleware.js";
+import { getMediaProvider } from "../../integrations/media/index.js";
 import type {
   AddOptionValueInput,
   CreateMediaInput,
@@ -142,19 +143,22 @@ export async function removeMedia(req: Request, res: Response, next: NextFunctio
   try {
     const { productId, mediaId } = req.params as unknown as MediaParams;
     const deleted = await variantsService.removeMedia(productId, mediaId);
-    // Only unlinks a file this server generated (its own /uploads/ path) —
-    // an externally-pasted URL is left alone. Best-effort, never blocks the
-    // response on a filesystem error.
-    deleteProductUploadIfOwned(deleted.url);
+    // Only deletes an asset this server generated via upload (tracked by
+    // mediaPublicId) — an externally-pasted URL row has no publicId and is
+    // left alone. Best-effort, never blocks the response on a provider error.
+    if (deleted.mediaPublicId) {
+      void getMediaProvider().delete(deleted.mediaPublicId);
+    }
     res.status(204).send();
   } catch (error) {
     next(error);
   }
 }
 
-/// Multipart upload (Phase 6M) — multer (mediaUpload.middleware.ts) has
-/// already saved the file to local disk and validated type/size by the time
-/// this runs; this only builds the public URL and reuses the exact same
+/// Multipart upload — multer (mediaUpload.middleware.ts) has already
+/// validated type/size and buffered the file in memory by the time this
+/// runs; this uploads the buffer to the configured media provider
+/// (integrations/media/) and reuses the exact same
 /// VariantsService.createMedia the URL-entry endpoint uses, so every
 /// invariant (isPrimary/position handling) stays single-sourced.
 export async function uploadMedia(req: Request, res: Response, next: NextFunction) {
@@ -169,8 +173,16 @@ export async function uploadMedia(req: Request, res: Response, next: NextFunctio
     const variantId = typeof body.variantId === "string" && body.variantId !== "" ? body.variantId : undefined;
     const isPrimary = body.isPrimary === "true" ? true : undefined;
 
+    const result = await getMediaProvider().upload({
+      buffer: req.file.buffer,
+      mimeType: req.file.mimetype,
+      extension: extensionFor(req.file),
+      folder: "products",
+    });
+
     const media = await variantsService.createMedia(productId, {
-      url: buildProductMediaUrl(req, req.file.filename),
+      url: toAbsoluteMediaUrl(req, result.url),
+      mediaPublicId: result.publicId,
       altText,
       variantId,
       isPrimary,

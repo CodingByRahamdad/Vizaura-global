@@ -6,7 +6,7 @@ import { buildTestApp, csrfHeaders } from "../helpers/app.js";
 import { productPayload } from "../helpers/factories.js";
 import { resetTestData, closeTestDb, testPrisma } from "../helpers/db.js";
 import { asRole } from "../helpers/roles.js";
-import { PRODUCTS_UPLOAD_DIR } from "../../src/modules/catalog/mediaStorage.js";
+import { PRODUCTS_UPLOAD_DIR } from "../../src/integrations/media/local.provider.js";
 
 const app = buildTestApp();
 
@@ -152,6 +152,27 @@ describe("POST /api/v1/products/:productId/media/upload (Phase 6M local-disk upl
     // Best-effort unlink is async (fs.rm callback) — give it a tick.
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fs.existsSync(filePath)).toBe(false);
+  });
+
+  it("sets mediaPublicId on an uploaded row, leaves it null on a URL-pasted row", async () => {
+    const cookieHeader = await asProductManager();
+    const productId = await createProduct(cookieHeader);
+
+    const uploadRes = await request(app)
+      .post(`/api/v1/products/${productId}/media/upload`)
+      .set(csrfHeaders())
+      .set("Cookie", cookieHeader)
+      .attach("file", tinyPng, { filename: "photo.png", contentType: "image/png" });
+    const uploadedRow = await testPrisma().productMedia.findUniqueOrThrow({ where: { id: uploadRes.body.data.id } });
+    expect(uploadedRow.mediaPublicId).not.toBeNull();
+
+    const pastedRes = await request(app)
+      .post(`/api/v1/products/${productId}/media`)
+      .set(csrfHeaders())
+      .set("Cookie", cookieHeader)
+      .send({ url: "https://cdn.example.com/external.jpg" });
+    const pastedRow = await testPrisma().productMedia.findUniqueOrThrow({ where: { id: pastedRes.body.data.id } });
+    expect(pastedRow.mediaPublicId).toBeNull();
   });
 
   it("never deletes the file for an externally-pasted URL media row", async () => {

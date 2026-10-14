@@ -143,7 +143,13 @@ export class VariantsService {
 
   // -- Media --------------------------------------------------------------
 
-  async createMedia(productId: string, input: CreateMediaInput): Promise<ProductMedia> {
+  async createMedia(
+    productId: string,
+    // mediaPublicId is never client-supplied (stripped by createMediaSchema
+    // for the URL-paste endpoint); only the upload controller passes it,
+    // after it receives it from the media provider itself.
+    input: CreateMediaInput & { mediaPublicId?: string },
+  ): Promise<ProductMedia> {
     await this.assertProductExists(productId);
     if (input.variantId) {
       await this.assertVariantExists(productId, input.variantId);

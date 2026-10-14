@@ -6,7 +6,8 @@ import { authErrors, catalogErrors } from "../../errors/AppError.js";
 import { toSkipTake, toPaginationMeta } from "./pagination.js";
 import { recordAudit } from "../audit/auditLog.helper.js";
 import { notifyAdmins } from "../notifications/notifications.helper.js";
-import { buildCategoryMediaUrl } from "./mediaStorage.js";
+import { toAbsoluteMediaUrl, extensionFor } from "./mediaUpload.middleware.js";
+import { getMediaProvider } from "../../integrations/media/index.js";
 import type { CategoryIdParams, CreateCategoryInput, ListCategoriesQuery, UpdateCategoryInput } from "./categories.validators.js";
 
 const categoriesService = new CategoriesService();
@@ -110,8 +111,13 @@ export async function uploadImage(req: Request, res: Response, next: NextFunctio
     if (!req.file) {
       throw catalogErrors.validation({ fields: [{ path: "file", message: "No file was uploaded." }] });
     }
-    const url = buildCategoryMediaUrl(req, req.file.filename);
-    res.status(201).json(successResponse({ url }));
+    const result = await getMediaProvider().upload({
+      buffer: req.file.buffer,
+      mimeType: req.file.mimetype,
+      extension: extensionFor(req.file),
+      folder: "categories",
+    });
+    res.status(201).json(successResponse({ url: toAbsoluteMediaUrl(req, result.url) }));
   } catch (error) {
     next(error);
   }

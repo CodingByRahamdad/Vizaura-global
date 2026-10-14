@@ -5,7 +5,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { buildTestApp, csrfHeaders } from "../helpers/app.js";
 import { resetTestData, closeTestDb } from "../helpers/db.js";
 import { asRole } from "../helpers/roles.js";
-import { CATEGORIES_UPLOAD_DIR } from "../../src/modules/catalog/mediaStorage.js";
+import { CATEGORIES_UPLOAD_DIR } from "../../src/integrations/media/local.provider.js";
 
 const app = buildTestApp();
 

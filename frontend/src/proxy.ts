@@ -8,11 +8,13 @@ import { NextRequest, NextResponse } from "next/server";
 // here was statically optimized to begin with.
 
 // Product/category/promotion images are absolute URLs served directly from
-// the backend's own host (backend/src/modules/catalog/mediaStorage.ts) —
-// never proxied through next.config.ts's rewrite. So this must resolve the
-// backend's real origin even when NEXT_PUBLIC_API_BASE_URL is set to a
-// relative path ("/api/v1", in production — see lib/api.ts), which `new
-// URL()` can't parse on its own. API_BASE_URL_INTERNAL is always absolute.
+// the backend's own host (backend/src/integrations/media/local.provider.ts
+// in dev/test) or from Cloudinary (backend/src/integrations/media/
+// cloudinary.provider.ts, required in production) — never proxied through
+// next.config.ts's rewrite. So this must resolve the backend's real origin
+// even when NEXT_PUBLIC_API_BASE_URL is set to a relative path ("/api/v1",
+// in production — see lib/api.ts), which `new URL()` can't parse on its
+// own. API_BASE_URL_INTERNAL is always absolute.
 function apiOrigin(): string {
   try {
     const raw =
@@ -47,7 +49,7 @@ export function proxy(request: NextRequest) {
     default-src 'self';
     script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/${isDev ? " 'unsafe-eval'" : ""};
     style-src 'self' 'unsafe-inline';
-    img-src 'self' data:${backend ? ` ${backend}` : ""};
+    img-src 'self' data: https://res.cloudinary.com${backend ? ` ${backend}` : ""};
     font-src 'self';
     connect-src 'self'${backend ? ` ${backend}` : ""} https://www.google.com https://www.gstatic.com;
     frame-src https://www.google.com;

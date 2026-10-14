@@ -1,18 +1,9 @@
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 import multer from "multer";
 import type { NextFunction, Request, Response } from "express";
 import { catalogErrors } from "../../errors/AppError.js";
-import {
-  CATEGORIES_UPLOAD_DIR,
-  ensureCategoriesUploadDir,
-  ensureProductsUploadDir,
-  ensurePromotionsUploadDir,
-  PRODUCTS_UPLOAD_DIR,
-  PROMOTIONS_UPLOAD_DIR,
-} from "./mediaStorage.js";
 
-const ALLOWED_MIME_TYPES: Record<string, string> = {
+export const ALLOWED_MIME_TYPES: Record<string, string> = {
   "image/jpeg": ".jpg",
   "image/png": ".png",
   "image/webp": ".webp",
@@ -20,21 +11,26 @@ const ALLOWED_MIME_TYPES: Record<string, string> = {
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 const UNSUPPORTED_MEDIA_TYPE = "UNSUPPORTED_MEDIA_TYPE";
 
-function createImageUploadMiddleware(uploadDir: string, ensureDir: () => void) {
-  const storage = multer.diskStorage({
-    destination: (_req, _file, cb) => {
-      ensureDir();
-      cb(null, uploadDir);
-    },
-    // Uuid filename — never trusts the client-supplied original filename.
-    filename: (_req, file, cb) => {
-      const ext = ALLOWED_MIME_TYPES[file.mimetype] ?? path.extname(file.originalname).toLowerCase();
-      cb(null, `${randomUUID()}${ext}`);
-    },
-  });
+export function extensionFor(file: { mimetype: string; originalname: string }): string {
+  return ALLOWED_MIME_TYPES[file.mimetype] ?? path.extname(file.originalname).toLowerCase();
+}
 
+/// A media provider (see integrations/media/) may return an absolute URL
+/// (Cloudinary, which has its own CDN host) or a relative one (local disk,
+/// which has none) — this resolves the latter against the current request,
+/// exactly how the old buildXMediaUrl helpers did, and passes the former
+/// through unchanged.
+export function toAbsoluteMediaUrl(req: Request, url: string): string {
+  if (/^https?:\/\//i.test(url)) return url;
+  return `${req.protocol}://${req.get("host")}${url}`;
+}
+
+function createImageUploadMiddleware() {
   const upload = multer({
-    storage,
+    // Streamed straight to the configured media provider (see
+    // integrations/media/) — never written to disk here, so this works
+    // identically whether the provider is local or Cloudinary.
+    storage: multer.memoryStorage(),
     limits: { fileSize: MAX_FILE_SIZE_BYTES },
     fileFilter: (_req, file, cb) => {
       if (!(file.mimetype in ALLOWED_MIME_TYPES)) {
@@ -75,6 +71,6 @@ function createImageUploadMiddleware(uploadDir: string, ensureDir: () => void) {
   };
 }
 
-export const productMediaUpload = createImageUploadMiddleware(PRODUCTS_UPLOAD_DIR, ensureProductsUploadDir);
-export const categoryImageUpload = createImageUploadMiddleware(CATEGORIES_UPLOAD_DIR, ensureCategoriesUploadDir);
-export const promotionImageUpload = createImageUploadMiddleware(PROMOTIONS_UPLOAD_DIR, ensurePromotionsUploadDir);
+export const productMediaUpload = createImageUploadMiddleware();
+export const categoryImageUpload = createImageUploadMiddleware();
+export const promotionImageUpload = createImageUploadMiddleware();

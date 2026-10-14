@@ -289,7 +289,15 @@ export class VariantsRepository {
 
   async createMedia(
     productId: string,
-    data: { type?: MediaType; url: string; altText?: string; variantId?: string; position?: number; isPrimary?: boolean },
+    data: {
+      type?: MediaType;
+      url: string;
+      mediaPublicId?: string;
+      altText?: string;
+      variantId?: string;
+      position?: number;
+      isPrimary?: boolean;
+    },
   ): Promise<ProductMedia> {
     return this.prisma.$transaction(async (tx) => {
       await this.lockProduct(tx, productId);
@@ -302,6 +310,7 @@ export class VariantsRepository {
           variantId: data.variantId,
           type: data.type,
           url: data.url,
+          mediaPublicId: data.mediaPublicId,
           altText: data.altText,
           position: data.position,
           isPrimary: data.isPrimary ?? false,

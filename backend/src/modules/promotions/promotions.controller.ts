@@ -8,7 +8,8 @@ import { recordAudit } from "../audit/auditLog.helper.js";
 import { notifyAdmins } from "../notifications/notifications.helper.js";
 import { CustomerNotificationsService } from "../notifications/notifications.service.js";
 import { UsersRepository } from "../users/users.repository.js";
-import { buildPromotionMediaUrl } from "../catalog/mediaStorage.js";
+import { toAbsoluteMediaUrl, extensionFor } from "../catalog/mediaUpload.middleware.js";
+import { getMediaProvider } from "../../integrations/media/index.js";
 import type {
   BroadcastPromotionInput,
   CreatePromotionInput,
@@ -90,8 +91,13 @@ export async function uploadImage(req: Request, res: Response, next: NextFunctio
     if (!req.file) {
       throw promotionsErrors.validation({ fields: [{ path: "file", message: "No file was uploaded." }] });
     }
-    const url = buildPromotionMediaUrl(req, req.file.filename);
-    res.status(201).json(successResponse({ url }));
+    const result = await getMediaProvider().upload({
+      buffer: req.file.buffer,
+      mimeType: req.file.mimetype,
+      extension: extensionFor(req.file),
+      folder: "promotions",
+    });
+    res.status(201).json(successResponse({ url: toAbsoluteMediaUrl(req, result.url) }));
   } catch (error) {
     next(error);
   }

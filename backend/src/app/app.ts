@@ -58,9 +58,11 @@ export function createApp() {
   app.use(cookieParser());
   app.use(csrfProtection);
 
-  // Local-disk product media (Phase 6M) — public, read-only, no directory
-  // listing (express.static's default). Dev/small-deployment appropriate
-  // only; see docs/modules/CATALOG.md for the production-storage caveat.
+  // Serves the local media provider's output only (integrations/media/) —
+  // dev/test default, never used in production, where the Cloudinary
+  // provider is required instead (env.ts refuses to boot otherwise). Public,
+  // read-only, no directory listing (express.static's default). See
+  // docs/modules/CATALOG.md.
   app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
   app.use("/api/v1", apiV1Router);
